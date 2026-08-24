@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.1 - 2026-08-24
 
 - Moved the source-checkout tunnel launchers to `integrations/tunnels/` so user-facing runtime integrations no longer live under repository-maintenance scripts. The previously documented `scripts/tunnel.sh` entry point remains as a compatibility wrapper.
 - Organized repository-owned components by responsibility: the npm launcher now lives in `packages/npm-launcher/`, the Cloudflare sandbox control plane in `infra/cloudflare/sandbox-control/`, and promo-video sources in `media/promo-video/`.
@@ -8,6 +8,8 @@
 - Added an upgrade-safe `scripts/install.sh --persistent` systemd deployment with a stable `--public-url`, loopback binding, mode-`0600` configuration, retained OAuth secrets/state, status checks, and state-preserving uninstall/purge behavior. Quick Tunnel launchers remain available for temporary deployments.
 - Added an interactive PyInstaller standalone builder and a server operations menu for install/update, start, stop, restart, status, logs, configuration, safe uninstall, and explicit purge.
 - Localized the standalone builder and persistent-server operations interface in Simplified Chinese, including prompts, confirmations, status summaries, and first-install password handling.
+- Added self-updating persistent-server operations: source checkouts fast-forward from the fork, standalone bundles download and verify the latest GitHub Release, and the configured public URL defaults to `https://cd.had.li`.
+- Added a dedicated `server-v*` GitHub Release workflow plus an explicit build-and-release command for versioned and stable-name standalone deployment bundles.
 
 ## 0.3.0 - 2026-08-13
 

@@ -127,6 +127,17 @@ curl https://cd.had.li/.well-known/oauth-protected-resource
 
 Repeat the same `--persistent` command to upgrade. Existing config, signing
 secret, login password, registered clients, and refresh tokens are reused.
+From this fork's checkout or standalone deployment bundle, the Chinese
+operations menu can update both the program and its scripts before reinstalling:
+
+```bash
+sudo ./integrations/server/manage.sh update
+```
+
+Source checkouts use a fast-forward-only pull from `origin/main`. Standalone
+bundles download the stable-name archive from the latest `server-v*` GitHub
+Release and verify its SHA-256 checksum. The default first-install public URL
+for this fork is `https://cd.had.li`; an existing configured URL always wins.
 Normal uninstall keeps them:
 
 ```bash

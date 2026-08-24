@@ -245,6 +245,16 @@ Source: https://github.com/xyTom/coding-tools-mcp
 # 如需把可选的 Pillow 图片能力一同打包，追加 --with-image。
 ```
 
+需要发布新版本时，选择菜单中的“构建并发布 GitHub Release”，或者在全部修改
+已经提交后执行：
+
+```bash
+./scripts/build-standalone.sh release --yes
+```
+
+该命令会推送 `main` 和 `server-v<版本>` tag。GitHub Actions 随后自动构建并
+发布带版本包和供自动更新使用的固定文件名包。
+
 日常 systemd 运维只需进入中文管理员菜单：
 
 ```bash
@@ -261,7 +271,11 @@ sudo ./integrations/server/manage.sh logs-follow
 sudo ./integrations/server/manage.sh configure
 ```
 
+“安装 / 更新”会先更新程序和运维脚本：源码仓库使用 `git pull --ff-only`，
+独立部署包则下载 GitHub 最新 Release 并验证 SHA-256，然后才重装并重启服务。
+
 当前服务器在菜单中填写 `/mulu`、`https://cd.had.li`、`127.0.0.1`、端口
-`8765`、OAuth 和需要的权限模式即可。普通 `uninstall` 会保留
+`8765`、OAuth 和需要的权限模式即可；首次安装时公网网址默认就是
+`https://cd.had.li`。普通 `uninstall` 会保留
 `/etc/coding-tools-mcp` 与 `/var/lib/coding-tools-mcp`；只有 `purge` 才会删除
 OAuth client、refresh token 和密钥。
