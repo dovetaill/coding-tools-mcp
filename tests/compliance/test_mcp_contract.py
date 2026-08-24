@@ -822,7 +822,10 @@ class MCPContractTests(ComplianceTestCase):
         try:
             metadata = self.wait_for_json(f"{base_url}/.well-known/oauth-authorization-server")
             self.assertEqual(metadata.get("issuer"), base_url)
-            self.assertEqual(metadata.get("grant_types_supported"), ["authorization_code"])
+            self.assertEqual(
+                metadata.get("grant_types_supported"),
+                ["authorization_code", "refresh_token"],
+            )
             self.assertEqual(metadata.get("response_types_supported"), ["code"])
             self.assertEqual(
                 set(metadata.get("token_endpoint_auth_methods_supported", [])),
@@ -870,9 +873,10 @@ class MCPContractTests(ComplianceTestCase):
             code = self.oauth_authorization_code(base_url, client_id, "test-password", verifier)
             token_status, token_response = self.oauth_token_request(base_url, client_id, code, verifier)
             self.assertEqual(token_status, 200)
-            self.assertEqual(token_response.get("expires_in"), 24 * 60 * 60)
+            self.assertEqual(token_response.get("expires_in"), 60 * 60)
             access_token = token_response.get("access_token")
             self.assertIsInstance(access_token, str)
+            self.assertIsInstance(token_response.get("refresh_token"), str)
 
             ok_status, ok = self.raw_post_to_auth_server(f"{base_url}/mcp", token=access_token)
             self.assertEqual(ok_status, 200)
@@ -882,6 +886,135 @@ class MCPContractTests(ComplianceTestCase):
             bad_status, bad = self.oauth_token_request(base_url, client_id, bad_code, "b" * 43)
             self.assertEqual(bad_status, 400)
             self.assertEqual(bad.get("error"), "invalid_grant")
+        finally:
+            self.stop_process(process)
+
+    def test_oauth_refresh_rotation_and_reuse_detection(self) -> None:
+        port = free_port()
+        base_url = f"http://127.0.0.1:{port}"
+        env = self.oauth_server_env(
+            CODING_TOOLS_MCP_OAUTH_PASSWORD="test-password",
+            CODING_TOOLS_MCP_OAUTH_TOKEN_SECRET=bytes(range(32)).hex(),
+        )
+        process = self.start_oauth_server(port, env)
+        try:
+            self.wait_for_json(f"{base_url}/.well-known/oauth-authorization-server")
+            client_id = self.oauth_register_client(base_url, "Refresh Rotation")
+            verifier = "r" * 43
+            code = self.oauth_authorization_code(base_url, client_id, "test-password", verifier)
+            token_status, token_response = self.oauth_token_request(base_url, client_id, code, verifier)
+            self.assertEqual(token_status, 200)
+            refresh_a = token_response.get("refresh_token")
+            self.assertIsInstance(refresh_a, str)
+
+            refresh_status, refreshed = self.oauth_refresh_request(
+                base_url,
+                client_id,
+                str(refresh_a),
+            )
+            self.assertEqual(refresh_status, 200)
+            self.assertIsInstance(refreshed.get("access_token"), str)
+            refresh_b = refreshed.get("refresh_token")
+            self.assertIsInstance(refresh_b, str)
+            self.assertNotEqual(refresh_b, refresh_a)
+
+            reuse_status, reuse = self.oauth_refresh_request(base_url, client_id, str(refresh_a))
+            self.assertEqual(reuse_status, 400)
+            self.assertEqual(reuse.get("error"), "invalid_grant")
+
+            family_status, family = self.oauth_refresh_request(base_url, client_id, str(refresh_b))
+            self.assertEqual(family_status, 400)
+            self.assertEqual(family.get("error"), "invalid_grant")
+        finally:
+            self.stop_process(process)
+
+    def test_oauth_client_and_refresh_token_survive_server_restart(self) -> None:
+        port = free_port()
+        base_url = f"http://127.0.0.1:{port}"
+        env = self.oauth_server_env(
+            CODING_TOOLS_MCP_OAUTH_PASSWORD="test-password",
+            CODING_TOOLS_MCP_OAUTH_TOKEN_SECRET=bytes(range(32)).hex(),
+        )
+        first = self.start_oauth_server(port, env)
+        try:
+            self.wait_for_json(f"{base_url}/.well-known/oauth-authorization-server")
+            client_id = self.oauth_register_client(base_url, "Restart Persistence")
+            verifier = "s" * 43
+            code = self.oauth_authorization_code(base_url, client_id, "test-password", verifier)
+            token_status, token_response = self.oauth_token_request(base_url, client_id, code, verifier)
+            self.assertEqual(token_status, 200)
+            original_access_token = token_response.get("access_token")
+            self.assertIsInstance(original_access_token, str)
+            refresh_token = token_response.get("refresh_token")
+            self.assertIsInstance(refresh_token, str)
+        finally:
+            self.stop_process(first)
+
+        second = self.start_oauth_server(port, env)
+        try:
+            self.wait_for_json(f"{base_url}/.well-known/oauth-authorization-server")
+            original_status, original_response = self.raw_post_to_auth_server(
+                f"{base_url}/mcp",
+                token=str(original_access_token),
+            )
+            self.assertEqual(original_status, 200)
+            self.assertEqual(original_response.get("result"), {})
+            refresh_status, refreshed = self.oauth_refresh_request(
+                base_url,
+                client_id,
+                str(refresh_token),
+            )
+            self.assertEqual(refresh_status, 200)
+            access_token = refreshed.get("access_token")
+            self.assertIsInstance(access_token, str)
+            ok_status, ok = self.raw_post_to_auth_server(f"{base_url}/mcp", token=str(access_token))
+            self.assertEqual(ok_status, 200)
+            self.assertEqual(ok.get("result"), {})
+        finally:
+            self.stop_process(second)
+
+    def test_oauth_expired_refresh_token_is_rejected(self) -> None:
+        port = free_port()
+        base_url = f"http://127.0.0.1:{port}"
+        env = self.oauth_server_env(
+            CODING_TOOLS_MCP_OAUTH_PASSWORD="test-password",
+            CODING_TOOLS_MCP_OAUTH_TOKEN_SECRET=bytes(range(32)).hex(),
+            CODING_TOOLS_MCP_OAUTH_REFRESH_TOKEN_TTL="1",
+        )
+        process = self.start_oauth_server(port, env)
+        try:
+            self.wait_for_json(f"{base_url}/.well-known/oauth-authorization-server")
+            client_id = self.oauth_register_client(base_url, "Expired Refresh")
+            verifier = "t" * 43
+            code = self.oauth_authorization_code(base_url, client_id, "test-password", verifier)
+            token_status, token_response = self.oauth_token_request(base_url, client_id, code, verifier)
+            self.assertEqual(token_status, 200)
+            refresh_token = token_response.get("refresh_token")
+            self.assertIsInstance(refresh_token, str)
+            time.sleep(1.1)
+            refresh_status, refreshed = self.oauth_refresh_request(
+                base_url,
+                client_id,
+                str(refresh_token),
+            )
+            self.assertEqual(refresh_status, 400)
+            self.assertEqual(refreshed.get("error"), "invalid_grant")
+        finally:
+            self.stop_process(process)
+
+    def test_oauth_refresh_rejects_invalid_client(self) -> None:
+        port = free_port()
+        base_url = f"http://127.0.0.1:{port}"
+        env = self.oauth_server_env(
+            CODING_TOOLS_MCP_OAUTH_PASSWORD="test-password",
+            CODING_TOOLS_MCP_OAUTH_TOKEN_SECRET=bytes(range(32)).hex(),
+        )
+        process = self.start_oauth_server(port, env)
+        try:
+            self.wait_for_json(f"{base_url}/.well-known/oauth-authorization-server")
+            status, response = self.oauth_refresh_request(base_url, "unknown-client", "not-issued")
+            self.assertEqual(status, 400)
+            self.assertEqual(response.get("error"), "invalid_client")
         finally:
             self.stop_process(process)
 
@@ -1078,7 +1211,7 @@ class MCPContractTests(ComplianceTestCase):
         finally:
             self.stop_process(process)
 
-    def test_oauth_dynamic_registration_normalizes_unsupported_flow_metadata(self) -> None:
+    def test_oauth_dynamic_registration_advertises_and_accepts_refresh_grant(self) -> None:
         port = free_port()
         base_url = f"http://127.0.0.1:{port}"
         env = self.oauth_server_env(
@@ -1106,7 +1239,7 @@ class MCPContractTests(ComplianceTestCase):
             )
             self.assertEqual(status, 201, response_body)
             response = json.loads(response_body)
-            self.assertEqual(response.get("grant_types"), ["authorization_code"])
+            self.assertEqual(response.get("grant_types"), ["authorization_code", "refresh_token"])
             self.assertEqual(response.get("response_types"), ["code"])
 
             refresh_body = urllib.parse.urlencode(
@@ -1125,7 +1258,7 @@ class MCPContractTests(ComplianceTestCase):
                 headers={"Content-Type": "application/x-www-form-urlencoded"},
             )
             self.assertEqual(refresh_status, 400)
-            self.assertEqual(json.loads(refresh_response).get("error"), "unsupported_grant_type")
+            self.assertEqual(json.loads(refresh_response).get("error"), "invalid_grant")
 
             unsupported_only_body = json.dumps(
                 {
@@ -2014,13 +2147,17 @@ class MCPContractTests(ComplianceTestCase):
             "CODING_TOOLS_MCP_OAUTH_PASSWORD",
             "CODING_TOOLS_MCP_OAUTH_TOKEN_SECRET",
             "CODING_TOOLS_MCP_OAUTH_TOKEN_TTL",
+            "CODING_TOOLS_MCP_OAUTH_ACCESS_TOKEN_TTL",
+            "CODING_TOOLS_MCP_OAUTH_REFRESH_TOKEN_TTL",
             "CODING_TOOLS_MCP_OAUTH_REDIRECT_URIS",
             "CODING_TOOLS_MCP_SERVER_URL",
+            "CODING_TOOLS_MCP_STATE_DIR",
             "CODING_TOOLS_MCP_AUTH_TOKEN",
             "CODING_TOOLS_MCP_OAUTH_MODE",
             "CODING_TOOLS_MCP_TRUST_PROXY_HEADERS",
         ):
             env.pop(name, None)
+        env["CODING_TOOLS_MCP_STATE_DIR"] = str(self.workspace.root / ".oauth-state")
         env.update(overrides)
         return env
 
@@ -2058,7 +2195,7 @@ class MCPContractTests(ComplianceTestCase):
             {
                 "client_name": client_name,
                 "redirect_uris": ["http://127.0.0.1/callback"],
-                "grant_types": ["authorization_code"],
+                "grant_types": ["authorization_code", "refresh_token"],
                 "response_types": ["code"],
                 "token_endpoint_auth_method": auth_method,
             }
@@ -2178,6 +2315,39 @@ class MCPContractTests(ComplianceTestCase):
             "/oauth/token",
             body=body,
             headers=request_headers,
+        )
+        return status, json.loads(response_body)
+
+    def oauth_refresh_request(
+        self,
+        base_url: str,
+        client_id: str,
+        refresh_token: str,
+        *,
+        client_secret: str | None = None,
+        client_auth_method: str | None = None,
+        resource: str | None = None,
+    ) -> tuple[int, dict[str, Any]]:
+        params = {
+            "grant_type": "refresh_token",
+            "client_id": client_id,
+            "refresh_token": refresh_token,
+        }
+        if resource is not None:
+            params["resource"] = resource
+        if client_secret is not None and client_auth_method != "client_secret_basic":
+            params["client_secret"] = client_secret
+        body = urllib.parse.urlencode(params).encode("utf-8")
+        headers = {"Content-Type": "application/x-www-form-urlencoded"}
+        if client_secret is not None and client_auth_method == "client_secret_basic":
+            credentials = base64.b64encode(f"{client_id}:{client_secret}".encode("utf-8")).decode("ascii")
+            headers["Authorization"] = f"Basic {credentials}"
+        status, _, response_body = self.raw_base_http_request(
+            base_url,
+            "POST",
+            "/oauth/token",
+            body=body,
+            headers=headers,
         )
         return status, json.loads(response_body)
 

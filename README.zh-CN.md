@@ -68,12 +68,33 @@ Gemini CLI 或 Cline——各家的 JSON 配置完全相同（偏好 Node 的话
 [docs/quickstart.md](docs/quickstart.md) 与
 [docs/mcp-client-config.md](docs/mcp-client-config.md)。
 
+### 临时隧道与长期 Remote MCP
+
+Cloudflare Quick Tunnel 适合临时测试，重启后公网 URL 可能变化。长期连接
+ChatGPT 时，应使用固定 HTTPS 域名、Nginx/Caddy 到回环地址的反向代理、持久化
+OAuth 状态和 systemd：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/dovetaill/coding-tools-mcp/main/scripts/install.sh | \
+  CODING_TOOLS_MCP_AUTH_MODE=oauth \
+  CODING_TOOLS_MCP_PERMISSION_MODE=dangerous \
+  bash -s -- \
+  --persistent \
+  --workspace /path/to/workspace \
+  --public-url https://mcp.example.com
+```
+
+该模式默认监听 `127.0.0.1:8765`，安装 `coding-tools-mcp.service`，以 `0600`
+权限保存配置和 secret，并在 SQLite 中持久化动态 OAuth client 与轮换 refresh
+token。重复安装会保留认证状态。完整 Nginx、Certbot、升级、状态检查和卸载说明见
+[Remote MCP](docs/remote-mcp.md#persistent-remote-mcp)。
+
 ## 七个值得一试的玩法
 
 **1. 让 Claude Desktop 成为你的编程 agent。**
 上面那份配置就是全部——你已经在付费的聊天窗口，现在能读代码、打补丁、跑测试、看 diff。
 
-**2. 随时随地连回自己的电脑写代码。**
+**2. 通过临时隧道测试远程访问。**
 
 ```bash
 CODING_TOOLS_MCP_AUTH_MODE=bearer ./integrations/tunnels/tunnel.sh cloudflared /path/to/repo
@@ -83,6 +104,7 @@ CODING_TOOLS_MCP_AUTH_MODE=bearer ./integrations/tunnels/tunnel.sh cloudflared /
 Tunnel）。手机上打开 claude.ai，指向 `https://<tunnel-host>/mcp`，就能驱动家里的
 工作站。ChatGPT 与 Grok 通过各自的连接器设置同样接入。内置 Bearer token 与
 OAuth 2.1 + PKCE（含 RFC 7591 动态注册）。
+需要跨重启长期稳定连接时，请使用上面的 persistent 模式。
 → [docs/remote-mcp.md](docs/remote-mcp.md)
 
 **3. 在一次性 Docker 沙箱里放心跑可疑代码。**
@@ -207,3 +229,40 @@ Author: Coding Tools MCP Contributors
 Source: https://github.com/xyTom/coding-tools-mcp
 
 引用元数据见 [CITATION.cff](CITATION.cff)。
+
+## 一键构建与服务器运维
+
+直接运行独立打包脚本即可进入交互式界面：
+
+```bash
+./scripts/build-standalone.sh
+```
+
+它会在 `dist/` 中生成单文件可执行程序和部署压缩包。可执行程序对应执行构建
+时的操作系统与 CPU 架构。也可以用单条非交互命令构建：
+
+```bash
+./scripts/build-standalone.sh build
+# 如需把可选的 Pillow 图片能力一同打包，追加 --with-image。
+```
+
+日常 systemd 运维只需进入管理员菜单：
+
+```bash
+sudo ./integrations/server/manage.sh
+```
+
+菜单支持安装/更新、启动、停止、重启、状态、日志、修改配置、安全卸载和明确
+清除。也可以直接执行单项操作：
+
+```bash
+sudo ./integrations/server/manage.sh status
+sudo ./integrations/server/manage.sh restart
+sudo ./integrations/server/manage.sh logs-follow
+sudo ./integrations/server/manage.sh configure
+```
+
+当前服务器在菜单中填写 `/path/to/workspace`、`https://mcp.example.com`、`127.0.0.1`、端口
+`8765`、OAuth 和需要的权限模式即可。普通 `uninstall` 会保留
+`/etc/coding-tools-mcp` 与 `/var/lib/coding-tools-mcp`；只有 `purge` 才会删除
+OAuth client、refresh token 和密钥。

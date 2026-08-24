@@ -20,6 +20,19 @@ curl -fsSL https://raw.githubusercontent.com/xyTom/coding-tools-mcp/main/scripts
   | bash -s -- --tunnel cloudflared --auto-install-tunnel --workspace /path/to/repo
 ```
 
+Install a long-running OAuth server behind a stable HTTPS reverse proxy:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/dovetaill/coding-tools-mcp/main/scripts/install.sh | \
+  CODING_TOOLS_MCP_AUTH_MODE=oauth \
+  CODING_TOOLS_MCP_PERMISSION_MODE=dangerous \
+  bash -s -- --persistent --workspace /path/to/workspace --public-url https://mcp.example.com
+```
+
+This creates an upgrade-safe systemd service, a private environment file, and
+persistent SQLite OAuth state. See [Remote MCP](remote-mcp.md#persistent-remote-mcp)
+before exposing a `dangerous` permission-mode workspace.
+
 Or, from this checkout:
 
 ```bash

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import binascii
 import ctypes
 import errno
 import hashlib
@@ -38,15 +39,20 @@ from .envutils import ENV_PREFIX, truthy_env
 from .errors import JsonRpcError, ToolFailure
 from .landlock_exec import libc_syscall
 from .oauth import (
+    OAUTH_ACCESS_TOKEN_TTL_SECONDS,
     OAUTH_CODE_TTL_SECONDS,
-    OAUTH_GRANT_TYPE_AUTHORIZATION_CODE,
+    OAUTH_GRANT_TYPE_REFRESH_TOKEN,
     OAUTH_GRANT_TYPES_SUPPORTED,
     OAUTH_MAX_BODY_BYTES,
+    OAUTH_REFRESH_TOKEN_TTL_SECONDS,
     OAUTH_RESPONSE_TYPES_SUPPORTED,
     MAX_PENDING_CODES,
-    OAUTH_TOKEN_TTL_SECONDS,
     OAuthConfig,
+    OAuthClientRegistry,
     create_access_token,
+    default_state_dir,
+    load_or_create_private_value,
+    normalize_server_url,
     valid_pkce_challenge,
     validate_access_token,
     verify_pkce,
@@ -6833,6 +6839,7 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
         code = _p("code")
         redirect_uri = _p("redirect_uri")
         code_verifier = _p("code_verifier")
+        refresh_token = _p("refresh_token")
         client_id = _p("client_id")
         client_secret = _p("client_secret")
         resource = _p("resource").rstrip("/")
@@ -6842,25 +6849,61 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
         auth_header = self.headers.get("Authorization", "")
         if auth_header.startswith("Basic ") and (not client_id or not client_secret):
             try:
-                decoded = base64.b64decode(auth_header[6:]).decode("utf-8")
+                decoded = base64.b64decode(auth_header[6:], validate=True).decode("utf-8")
                 basic_id, _, basic_secret = decoded.partition(":")
                 if not client_id:
                     client_id = urllib.parse.unquote(basic_id)
                 if not client_secret:
                     client_secret = urllib.parse.unquote(basic_secret)
                 presented_auth_method = "client_secret_basic"
-            except Exception:  # noqa: BLE001
-                pass
+            except (binascii.Error, UnicodeDecodeError, ValueError):
+                _err("invalid_client", "Malformed HTTP Basic client credentials")
+                return
 
-        if grant_type != OAUTH_GRANT_TYPE_AUTHORIZATION_CODE:
-            _err("unsupported_grant_type", "Only authorization_code is supported")
+        if grant_type not in OAUTH_GRANT_TYPES_SUPPORTED:
+            _err("unsupported_grant_type", "Unsupported grant_type")
             return
-        if cfg.registry.get(client_id) is None:
+        client = cfg.registry.get(client_id)
+        if client is None:
             _err("invalid_client", "Unknown client_id")
             return
         if not cfg.registry.authenticates(client_id, client_secret, presented_auth_method):
             _err("invalid_client", "Invalid client_secret")
             return
+        if not client.allows_grant(grant_type):
+            _err("unauthorized_client", "Client is not registered for this grant_type")
+            return
+
+        if grant_type == OAUTH_GRANT_TYPE_REFRESH_TOKEN:
+            if not refresh_token:
+                _err("invalid_grant", "refresh_token is required")
+                return
+            rotation = cfg.registry.store.rotate_refresh_token(
+                refresh_token,
+                client_id=client_id,
+                resource=resource or None,
+                ttl_seconds=cfg.refresh_token_ttl,
+            )
+            if rotation.status == "invalid_target":
+                _err("invalid_target", "resource mismatch")
+                return
+            if rotation.status != "rotated":
+                _err("invalid_grant", "Refresh token is invalid, expired, revoked, or already used")
+                return
+            assert rotation.resource is not None
+            assert rotation.refresh_token is not None
+            access_token = create_access_token(cfg, rotation.resource, client_id=client_id)
+            self.send_json(
+                {
+                    "access_token": access_token,
+                    "token_type": "Bearer",
+                    "expires_in": cfg.access_token_ttl,
+                    "refresh_token": rotation.refresh_token,
+                    "scope": "mcp",
+                }
+            )
+            return
+
         if not code:
             _err("invalid_grant", "code is required")
             return
@@ -6892,7 +6935,20 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
 
         server_url = resource
         access_token = create_access_token(cfg, server_url, client_id=client_id)
-        self.send_json({"access_token": access_token, "token_type": "Bearer", "expires_in": cfg.token_ttl})
+        response = {
+            "access_token": access_token,
+            "token_type": "Bearer",
+            "expires_in": cfg.access_token_ttl,
+            "scope": "mcp",
+        }
+        if client.allows_grant(OAUTH_GRANT_TYPE_REFRESH_TOKEN):
+            issued_refresh_token, _expires_at = cfg.registry.store.issue_refresh_token(
+                client_id=client_id,
+                resource=server_url,
+                ttl_seconds=cfg.refresh_token_ttl,
+            )
+            response["refresh_token"] = issued_refresh_token
+        self.send_json(response)
 
     def handle_oauth_register(self) -> None:
         cfg = self.runtime.oauth_config
@@ -7040,11 +7096,35 @@ def run_http(args: argparse.Namespace) -> int:
         client_id = os.environ.get(f"{ENV_PREFIX}_OAUTH_CLIENT_ID") or None
         client_secret = os.environ.get(f"{ENV_PREFIX}_OAUTH_CLIENT_SECRET") or None
         env_password = os.environ.get(f"{ENV_PREFIX}_OAUTH_PASSWORD")
-        password = env_password or secrets.token_urlsafe(32)
-        server_url = (os.environ.get(f"{ENV_PREFIX}_SERVER_URL") or "").rstrip("/") or None
-        if not env_password:
-            print(f"OAuth authorize password: {password}", file=sys.stderr)
+        state_dir = Path(args.state_dir).expanduser() if args.state_dir else default_state_dir()
+        try:
+            if env_password:
+                password = env_password
+                password_created = False
+            else:
+                password, password_created = load_or_create_private_value(
+                    state_dir / "oauth-password",
+                    lambda: secrets.token_urlsafe(32),
+                )
+            raw_server_url = (args.public_url or os.environ.get(f"{ENV_PREFIX}_SERVER_URL") or "").strip()
+            server_url = normalize_server_url(raw_server_url) if raw_server_url else None
+            registry = OAuthClientRegistry(state_dir / "oauth.db")
+        except (OSError, RuntimeError, ValueError) as exc:
+            print(f"ERROR: could not initialize persistent OAuth state: {exc}", file=sys.stderr)
+            return 2
+        if password_created:
+            print(f"OAuth authorize password (generated once): {password}", file=sys.stderr)
+            print(f"OAuth password file: {state_dir / 'oauth-password'}", file=sys.stderr)
         raw_secret = os.environ.get(f"{ENV_PREFIX}_OAUTH_TOKEN_SECRET") or ""
+        if not raw_secret:
+            try:
+                raw_secret, _secret_created = load_or_create_private_value(
+                    state_dir / "oauth-token-secret",
+                    lambda: secrets.token_hex(32),
+                )
+            except (OSError, ValueError) as exc:
+                print(f"ERROR: could not initialize OAuth token signing secret: {exc}", file=sys.stderr)
+                return 2
         if raw_secret:
             try:
                 token_secret = bytes.fromhex(raw_secret)
@@ -7060,21 +7140,33 @@ def run_http(args: argparse.Namespace) -> int:
                     file=sys.stderr,
                 )
                 return 2
-        else:
-            token_secret = secrets.token_bytes(32)
+        access_ttl_name = f"{ENV_PREFIX}_OAUTH_ACCESS_TOKEN_TTL"
+        legacy_ttl_name = f"{ENV_PREFIX}_OAUTH_TOKEN_TTL"
+        access_ttl_raw = os.environ.get(access_ttl_name) or os.environ.get(legacy_ttl_name)
         try:
-            token_ttl = int(os.environ.get(f"{ENV_PREFIX}_OAUTH_TOKEN_TTL") or OAUTH_TOKEN_TTL_SECONDS)
+            access_token_ttl = int(access_ttl_raw or OAUTH_ACCESS_TOKEN_TTL_SECONDS)
         except ValueError:
-            print(f"ERROR: {ENV_PREFIX}_OAUTH_TOKEN_TTL must be an integer.", file=sys.stderr)
+            print(f"ERROR: {access_ttl_name} must be an integer.", file=sys.stderr)
             return 2
-        if not 60 <= token_ttl <= 604_800:
-            print(f"ERROR: {ENV_PREFIX}_OAUTH_TOKEN_TTL must be between 60 and 604800 seconds.", file=sys.stderr)
+        if not 60 <= access_token_ttl <= 604_800:
+            print(f"ERROR: {access_ttl_name} must be between 60 and 604800 seconds.", file=sys.stderr)
+            return 2
+        refresh_ttl_name = f"{ENV_PREFIX}_OAUTH_REFRESH_TOKEN_TTL"
+        try:
+            refresh_token_ttl = int(os.environ.get(refresh_ttl_name) or OAUTH_REFRESH_TOKEN_TTL_SECONDS)
+        except ValueError:
+            print(f"ERROR: {refresh_ttl_name} must be an integer.", file=sys.stderr)
+            return 2
+        if not 1 <= refresh_token_ttl <= 31_536_000:
+            print(f"ERROR: {refresh_ttl_name} must be between 1 and 31536000 seconds.", file=sys.stderr)
             return 2
         oauth_config = OAuthConfig(
             password=password,
             server_url=server_url,
             token_secret=token_secret,
-            token_ttl=token_ttl,
+            access_token_ttl=access_token_ttl,
+            refresh_token_ttl=refresh_token_ttl,
+            registry=registry,
         )
         if client_id:
             raw_redirects = os.environ.get(f"{ENV_PREFIX}_OAUTH_REDIRECT_URIS") or "http://127.0.0.1/callback"
@@ -7202,6 +7294,22 @@ def build_parser() -> argparse.ArgumentParser:
             "enable OAuth 2.1 Authorization Code + PKCE; "
             f"{ENV_PREFIX}_SERVER_URL is optional; when unset OAuth metadata uses the request host; "
             "authorize password is generated when unset; RFC 7591 dynamic registration is enabled"
+        ),
+    )
+    parser.add_argument(
+        "--public-url",
+        default=None,
+        help=(
+            "canonical public HTTP(S) origin for OAuth metadata, without /mcp; "
+            f"defaults to {ENV_PREFIX}_SERVER_URL or the request URL"
+        ),
+    )
+    parser.add_argument(
+        "--state-dir",
+        default=None,
+        help=(
+            "persistent OAuth client, refresh-token, and fallback-secret directory; "
+            f"defaults to {ENV_PREFIX}_STATE_DIR or the user state directory"
         ),
     )
     parser.add_argument(
