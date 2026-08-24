@@ -133,6 +133,7 @@ The v0.5.0 reliability work. Migration notes:
 - Persisted RFC 7591 OAuth client registrations and rotating, revocable refresh tokens in a versioned SQLite database. Access tokens now default to one hour, refresh tokens to 90 days, and the legacy `CODING_TOOLS_MCP_OAUTH_TOKEN_TTL` remains an access-token TTL alias.
 - Added an upgrade-safe `scripts/install.sh --persistent` systemd deployment with a stable `--public-url`, loopback binding, mode-`0600` configuration, retained OAuth secrets/state, status checks, and state-preserving uninstall/purge behavior. Quick Tunnel launchers remain available for temporary deployments.
 - Added an interactive PyInstaller standalone builder and a server operations menu for install/update, start, stop, restart, status, logs, configuration, safe uninstall, and explicit purge.
+- Localized the standalone builder and persistent-server operations interface in Simplified Chinese, including prompts, confirmations, status summaries, and first-install password handling.
 
 ## 0.3.0 - 2026-08-13
 

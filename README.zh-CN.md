@@ -232,7 +232,7 @@ Source: https://github.com/xyTom/coding-tools-mcp
 
 ## 一键构建与服务器运维
 
-直接运行独立打包脚本即可进入交互式界面：
+直接运行独立打包脚本即可进入中文交互式界面：
 
 ```bash
 ./scripts/build-standalone.sh
@@ -246,7 +246,7 @@ Source: https://github.com/xyTom/coding-tools-mcp
 # 如需把可选的 Pillow 图片能力一同打包，追加 --with-image。
 ```
 
-日常 systemd 运维只需进入管理员菜单：
+日常 systemd 运维只需进入中文管理员菜单：
 
 ```bash
 sudo ./integrations/server/manage.sh
