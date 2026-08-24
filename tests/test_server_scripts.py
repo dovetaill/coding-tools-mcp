@@ -27,7 +27,7 @@ class ServerScriptTests(unittest.TestCase):
     def test_build_script_help(self) -> None:
         result = self.run_script(BUILD_SCRIPT, "--help")
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("Build a self-contained", result.stdout)
+        self.assertIn("构建可独立运行", result.stdout)
         self.assertIn("build", result.stdout)
         self.assertIn("verify", result.stdout)
         self.assertIn("clean", result.stdout)
@@ -35,6 +35,7 @@ class ServerScriptTests(unittest.TestCase):
     def test_manage_script_help_lists_operations(self) -> None:
         result = self.run_script(MANAGE_SCRIPT, "--help")
         self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("中文交互式运维工具", result.stdout)
         for operation in (
             "install",
             "update",
@@ -52,7 +53,7 @@ class ServerScriptTests(unittest.TestCase):
     def test_noninteractive_builder_requires_a_command(self) -> None:
         result = self.run_script(BUILD_SCRIPT)
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("no interactive terminal", result.stderr)
+        self.assertIn("没有交互终端", result.stderr)
 
     def test_clean_skips_an_unowned_build_directory(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -75,7 +76,7 @@ class ServerScriptTests(unittest.TestCase):
             )
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertTrue(sentinel.is_file())
-            self.assertIn("Skipping unowned build directory", result.stderr)
+            self.assertIn("跳过不属于本脚本的构建目录", result.stderr)
 
 
 if __name__ == "__main__":
