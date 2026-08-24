@@ -8,6 +8,7 @@ OUTPUT_DIR="${CODING_TOOLS_MCP_OUTPUT_DIR:-$REPO_ROOT/dist}"
 PYTHON_BIN="${PYTHON:-}"
 WITH_IMAGE=0
 ACTION="menu"
+ASSUME_YES=0
 BUILD_MARKER_NAME=".coding-tools-mcp-standalone-build"
 OUTPUT_MARKER_NAME=".coding-tools-mcp-standalone-output"
 
@@ -20,6 +21,7 @@ usage() {
 
 命令：
   build                 构建可执行程序和部署压缩包
+  release               构建后推送 server-v* tag，由 GitHub 自动发版
   verify                验证 dist/ 中现有的可执行程序
   clean                 清理本脚本生成的构建产物
 
@@ -27,6 +29,7 @@ usage() {
   --with-image          打包 Pillow，启用可选图片工具
   --output-dir 路径     输出目录，默认为 ./dist
   --python 路径         构建所用的 Python 3.11+ 解释器
+  --yes                 发布时不再询问确认
   -h, --help            显示本帮助
 
 生成文件：
@@ -124,7 +127,7 @@ write_checksums() {
 
 build_standalone() {
   validate_output_paths
-  local python version platform stage bundle_dir archive package_spec
+  local python version platform stage bundle_dir archive stable_archive package_spec
   python="$(find_python)" || die "需要 Python 3.11 或更高版本"
   "$python" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)' \
     || die "需要 Python 3.11 或更高版本"
@@ -134,6 +137,7 @@ build_standalone() {
 
   log "正在准备隔离构建环境"
   prepare_build_directory
+  rm -f -- "$OUTPUT_DIR"/coding-tools-mcp-*.tar.gz "$OUTPUT_DIR/SHA256SUMS"
   if [[ ! -x "$BUILD_ROOT/venv/bin/python" ]]; then
     "$python" -m venv "$BUILD_ROOT/venv"
   fi
@@ -173,8 +177,10 @@ build_standalone() {
   install -m 0755 "$OUTPUT_DIR/install.sh" "$bundle_dir/install.sh"
   install -m 0644 "$REPO_ROOT/LICENSE" "$bundle_dir/LICENSE"
   archive="$OUTPUT_DIR/coding-tools-mcp-$version-$platform.tar.gz"
+  stable_archive="$OUTPUT_DIR/coding-tools-mcp-$platform.tar.gz"
   rm -f -- "$archive"
   tar -C "$BUILD_ROOT/bundle" -czf "$archive" "$(basename "$bundle_dir")"
+  install -m 0644 "$archive" "$stable_archive"
   write_checksums
 
   cat <<EOF
@@ -189,6 +195,51 @@ build_standalone() {
 
 部署压缩包：
   $archive
+
+自动更新固定包名：
+  $stable_archive
+EOF
+}
+
+publish_release() {
+  command -v git >/dev/null 2>&1 || die "发布需要 git"
+  local version tag branch head tag_head answer
+  version="$(project_version)"
+  [[ -n "$version" ]] || die "无法读取项目版本"
+  tag="server-v$version"
+  branch="$(git -C "$REPO_ROOT" branch --show-current)"
+  [[ "$branch" == "main" ]] || die "发布必须在 main 分支执行，当前分支为：$branch"
+  [[ -z "$(git -C "$REPO_ROOT" status --porcelain --untracked-files=normal)" ]] \
+    || die "发布前必须提交全部代码修改"
+  if git -C "$REPO_ROOT" ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null 2>&1; then
+    die "远程发布 tag 已存在：$tag；请先升级项目版本"
+  fi
+  if [[ "$ASSUME_YES" != "1" ]]; then
+    [[ -t 0 && -t 1 ]] || die "非交互发布需要添加 --yes"
+    read -r -p "将推送 main 和 $tag，并触发 GitHub Release，确认发布吗？[y/N/是/否] " answer
+    [[ "$answer" =~ ^[Yy]([Ee][Ss])?$ || "$answer" == "是" ]] || {
+      echo "已取消发布。"
+      return
+    }
+  fi
+
+  build_standalone
+  head="$(git -C "$REPO_ROOT" rev-parse HEAD)"
+  if git -C "$REPO_ROOT" rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
+    tag_head="$(git -C "$REPO_ROOT" rev-list -n 1 "$tag")"
+    [[ "$tag_head" == "$head" ]] || die "本地 tag $tag 指向其他提交"
+  else
+    git -C "$REPO_ROOT" tag -a "$tag" -m "Coding Tools MCP server $version"
+  fi
+  log "正在推送 main 分支"
+  git -C "$REPO_ROOT" push origin HEAD:main
+  log "正在推送发布 tag：$tag"
+  git -C "$REPO_ROOT" push origin "refs/tags/$tag"
+  cat <<EOF
+
+发布已触发：$tag
+GitHub Actions 将自动构建并创建 Release：
+  https://github.com/dovetaill/coding-tools-mcp/actions
 EOF
 }
 
@@ -222,17 +273,19 @@ Coding Tools MCP 独立程序构建工具
 
   1) 构建可执行程序
   2) 构建可执行程序（包含图片支持）
-  3) 验证现有可执行程序
-  4) 清理构建产物
+  3) 构建并发布 GitHub Release
+  4) 验证现有可执行程序
+  5) 清理构建产物
   0) 退出
 EOF
     local choice
-    read -r -p "请选择 [0-4]：" choice
+    read -r -p "请选择 [0-5]：" choice
     case "$choice" in
       1) WITH_IMAGE=0; build_standalone ;;
       2) WITH_IMAGE=1; build_standalone ;;
-      3) verify_binary ;;
-      4)
+      3) ASSUME_YES=0; publish_release ;;
+      4) verify_binary ;;
+      5)
         read -r -p "确定清理独立构建产物吗？[y/N/是/否] " choice
         [[ "$choice" =~ ^[Yy]([Ee][Ss])?$ || "$choice" == "是" ]] && clean_build
         ;;
@@ -244,7 +297,7 @@ EOF
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    build|verify|clean)
+    build|release|verify|clean)
       ACTION="$1"
       ;;
     --with-image)
@@ -260,6 +313,9 @@ while [[ $# -gt 0 ]]; do
       PYTHON_BIN="$2"
       shift
       ;;
+    --yes)
+      ASSUME_YES=1
+      ;;
     -h|--help)
       usage
       exit 0
@@ -274,6 +330,7 @@ done
 case "$ACTION" in
   menu) interactive_menu ;;
   build) build_standalone ;;
+  release) publish_release ;;
   verify) verify_binary ;;
   clean) clean_build ;;
   *) die "未知操作：$ACTION" ;;

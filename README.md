@@ -268,6 +268,16 @@ built. A non-interactive build is also available:
 # Add --with-image to bundle the optional Pillow image support.
 ```
 
+After committing a release, publish the standalone server through the dedicated
+`server-v*` workflow:
+
+```bash
+./scripts/build-standalone.sh release --yes
+```
+
+This pushes `main` and the versioned server tag. GitHub Actions publishes both
+a versioned archive and a stable-name archive used by automatic updates.
+
 For day-to-day systemd operations, open the administrator menu:
 
 ```bash
@@ -285,7 +295,12 @@ sudo ./integrations/server/manage.sh logs-follow
 sudo ./integrations/server/manage.sh configure
 ```
 
+Update first fast-forwards a source checkout, or downloads and verifies the
+latest GitHub Release when running from a standalone bundle, before reinstalling
+and restarting the service.
+
 For this server, choose `/path/to/workspace`, `https://mcp.example.com`, `127.0.0.1`, port
-`8765`, OAuth, and the required permission mode in the menu. A normal
+`8765`, OAuth, and the required permission mode in the menu. First-time setup
+defaults the public URL to `https://mcp.example.com`. A normal
 `uninstall` preserves `/etc/coding-tools-mcp` and `/var/lib/coding-tools-mcp`;
 only `purge` deletes OAuth clients, refresh tokens, and secrets.

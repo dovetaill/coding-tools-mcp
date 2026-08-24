@@ -6,6 +6,10 @@ ORIGINAL_ARGS=("$@")
 SERVICE_NAME="${CODING_TOOLS_MCP_SERVICE_NAME:-coding-tools-mcp}"
 CONFIG_DIR="${CODING_TOOLS_MCP_CONFIG_DIR:-/etc/coding-tools-mcp}"
 ENV_FILE="${CODING_TOOLS_MCP_ENV_FILE:-$CONFIG_DIR/coding-tools-mcp.env}"
+DEFAULT_PUBLIC_URL="${CODING_TOOLS_MCP_DEFAULT_PUBLIC_URL:-https://mcp.example.com}"
+RELEASE_REPOSITORY="${CODING_TOOLS_MCP_RELEASE_REPOSITORY:-dovetaill/coding-tools-mcp}"
+RELEASE_BASE_URL="${CODING_TOOLS_MCP_RELEASE_BASE_URL:-https://github.com/$RELEASE_REPOSITORY/releases/latest/download}"
+SKIP_SELF_UPDATE="${CODING_TOOLS_MCP_SKIP_SELF_UPDATE:-0}"
 ACTION="menu"
 WORKSPACE=""
 PUBLIC_URL=""
@@ -36,7 +40,7 @@ usage() {
 
 命令：
   install               首次安装或重新配置
-  update                从当前源码或部署包更新并安全重启
+  update                自动更新程序和脚本，然后安全重启
   start                 启动服务
   stop                  停止服务
   restart               重启服务
@@ -132,8 +136,8 @@ collect_configuration() {
   current_user="$(unit_value User)"
 
   prompt_value WORKSPACE "工作目录" "${WORKSPACE:-${current_workspace:-$PWD}}" 1
-  prompt_value PUBLIC_URL "固定公网网址（例如 https://mcp.example.com）" \
-    "${PUBLIC_URL:-$current_url}" 1
+  prompt_value PUBLIC_URL "固定公网网址" \
+    "${PUBLIC_URL:-${current_url:-$DEFAULT_PUBLIC_URL}}" 1
   prompt_value HOST "监听地址" "${HOST:-${current_host:-127.0.0.1}}" 1
   prompt_value PORT "监听端口" "${PORT:-${current_port:-8765}}" 1
   prompt_choice AUTH_MODE "认证模式（oauth=网页登录，bearer=固定令牌）" \
@@ -189,6 +193,105 @@ EOF
   trap - INT TERM HUP
   rm -f -- "$log_file"
   return "$status"
+}
+
+download_file() {
+  local url="$1" output="$2"
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsSL --retry 3 "$url" -o "$output"
+  elif command -v wget >/dev/null 2>&1; then
+    wget -qO "$output" "$url"
+  else
+    die "自动更新需要 curl 或 wget"
+  fi
+}
+
+release_platform() {
+  local os arch
+  os="$(uname -s | tr '[:upper:]' '[:lower:]')"
+  arch="$(uname -m)"
+  case "$arch" in
+    x86_64|amd64) arch="x86_64" ;;
+    *) die "GitHub 自动发布包目前仅支持 x86_64，当前架构为：$arch" ;;
+  esac
+  [[ "$os" == "linux" ]] || die "独立包自动更新目前仅支持 Linux"
+  printf '%s-%s\n' "$os" "$arch"
+}
+
+verify_download_checksum() {
+  local archive="$1" checksums="$2" asset_name="$3" expected actual
+  expected="$(awk -v name="$asset_name" '$2 == name || $2 == "./" name {print $1; exit}' "$checksums")"
+  [[ -n "$expected" ]] || die "发布校验文件中找不到 $asset_name"
+  if command -v sha256sum >/dev/null 2>&1; then
+    actual="$(sha256sum "$archive" | awk '{print $1}')"
+  elif command -v shasum >/dev/null 2>&1; then
+    actual="$(shasum -a 256 "$archive" | awk '{print $1}')"
+  else
+    die "校验更新包需要 sha256sum 或 shasum"
+  fi
+  [[ "$actual" == "$expected" ]] || die "更新包 SHA-256 校验失败"
+}
+
+atomic_install() {
+  local mode="$1" source="$2" target="$3" temporary
+  temporary="${target}.new.$$"
+  install -m "$mode" "$source" "$temporary"
+  mv -f -- "$temporary" "$target"
+}
+
+update_bundle_source() {
+  local platform asset base_url temp_dir archive checksums bundle_dir
+  platform="$(release_platform)"
+  asset="coding-tools-mcp-$platform.tar.gz"
+  base_url="$RELEASE_BASE_URL"
+  temp_dir="$(mktemp -d "${TMPDIR:-/tmp}/coding-tools-mcp-update.XXXXXX")"
+  archive="$temp_dir/$asset"
+  checksums="$temp_dir/SHA256SUMS"
+  trap 'rm -rf -- "$temp_dir"; exit 130' INT TERM HUP
+  echo "==> 正在从 GitHub Release 下载最新版程序和脚本……"
+  download_file "$base_url/$asset" "$archive"
+  download_file "$base_url/SHA256SUMS" "$checksums"
+  verify_download_checksum "$archive" "$checksums" "$asset"
+  tar -C "$temp_dir" -xzf "$archive"
+  bundle_dir="$(find "$temp_dir" -mindepth 1 -maxdepth 1 -type d -name 'coding-tools-mcp-*' -print -quit)"
+  [[ -n "$bundle_dir" ]] || die "更新包目录结构无效"
+  [[ -x "$bundle_dir/coding-tools-mcp" ]] || die "更新包缺少服务器程序"
+  [[ -x "$bundle_dir/coding-tools-mcp-admin" ]] || die "更新包缺少运维脚本"
+  [[ -x "$bundle_dir/install.sh" ]] || die "更新包缺少安装脚本"
+  atomic_install 0755 "$bundle_dir/coding-tools-mcp" "$SCRIPT_DIR/coding-tools-mcp"
+  atomic_install 0755 "$bundle_dir/coding-tools-mcp-admin" "$SCRIPT_DIR/coding-tools-mcp-admin"
+  atomic_install 0755 "$bundle_dir/install.sh" "$SCRIPT_DIR/install.sh"
+  trap - INT TERM HUP
+  rm -rf -- "$temp_dir"
+  INSTALLER="$SCRIPT_DIR/install.sh"
+  INSTALL_VALUE="$SCRIPT_DIR/coding-tools-mcp"
+  echo "程序和运维脚本已更新到最新 Release。"
+  if [[ ${#ORIGINAL_ARGS[@]} -gt 0 ]]; then
+    exec env CODING_TOOLS_MCP_SKIP_SELF_UPDATE=1 \
+      "$SCRIPT_DIR/coding-tools-mcp-admin" "${ORIGINAL_ARGS[@]}"
+  fi
+}
+
+update_repository_source() {
+  command -v git >/dev/null 2>&1 || die "源码模式自动更新需要 git"
+  if [[ -n "$(git -C "$REPO_ROOT" status --porcelain --untracked-files=normal)" ]]; then
+    die "仓库存在未提交修改；为防止覆盖，请先提交或处理后再更新"
+  fi
+  run_logged_command "源码和运维脚本已更新。" \
+    git -C "$REPO_ROOT" pull --ff-only origin main
+  if [[ ${#ORIGINAL_ARGS[@]} -gt 0 ]]; then
+    exec env CODING_TOOLS_MCP_SKIP_SELF_UPDATE=1 \
+      "$REPO_ROOT/integrations/server/manage.sh" "${ORIGINAL_ARGS[@]}"
+  fi
+}
+
+update_program_and_scripts() {
+  [[ "$SKIP_SELF_UPDATE" == "1" ]] && return
+  if [[ "$INSTALL_KIND" == "source" ]]; then
+    update_repository_source
+  else
+    update_bundle_source
+  fi
 }
 
 run_install() {
@@ -285,6 +388,7 @@ run_action() {
       run_install 1
       ;;
     update)
+      update_program_and_scripts
       if [[ ! -f "$ENV_FILE" ]]; then
         echo "未找到持久安装，将进入首次配置。"
         run_install 1
