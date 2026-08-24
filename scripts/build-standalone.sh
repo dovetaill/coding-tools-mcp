@@ -13,23 +13,23 @@ OUTPUT_MARKER_NAME=".coding-tools-mcp-standalone-output"
 
 usage() {
   cat <<'EOF'
-Usage: scripts/build-standalone.sh [command] [options]
+用法：scripts/build-standalone.sh [命令] [选项]
 
-Build a self-contained coding-tools-mcp executable and a deployment bundle.
-Running without a command opens an interactive menu.
+构建可独立运行的 coding-tools-mcp 单文件程序和部署压缩包。
+不带参数运行时会进入中文交互菜单。
 
-Commands:
-  build                 Build the executable and deployment archive.
-  verify                Verify the existing executable in dist/.
-  clean                 Remove this script's standalone build outputs.
+命令：
+  build                 构建可执行程序和部署压缩包
+  verify                验证 dist/ 中现有的可执行程序
+  clean                 清理本脚本生成的构建产物
 
-Options:
-  --with-image          Bundle Pillow and enable image tools.
-  --output-dir PATH     Output directory. Default: ./dist
-  --python PATH         Python 3.11+ interpreter used for the build.
-  -h, --help            Show this help.
+选项：
+  --with-image          打包 Pillow，启用可选图片工具
+  --output-dir 路径     输出目录，默认为 ./dist
+  --python 路径         构建所用的 Python 3.11+ 解释器
+  -h, --help            显示本帮助
 
-Outputs:
+生成文件：
   dist/coding-tools-mcp
   dist/coding-tools-mcp-admin
   dist/install.sh
@@ -39,7 +39,7 @@ EOF
 }
 
 die() {
-  echo "error: $*" >&2
+  echo "错误：$*" >&2
   exit 1
 }
 
@@ -61,10 +61,10 @@ find_python() {
 
 validate_output_paths() {
   case "$BUILD_ROOT" in
-    ""|/) die "refusing unsafe build directory: $BUILD_ROOT" ;;
+    ""|/) die "拒绝使用不安全的构建目录：$BUILD_ROOT" ;;
   esac
   case "$OUTPUT_DIR" in
-    ""|/) die "refusing unsafe output directory: $OUTPUT_DIR" ;;
+    ""|/) die "拒绝使用不安全的输出目录：$OUTPUT_DIR" ;;
   esac
 }
 
@@ -72,7 +72,7 @@ prepare_build_directory() {
   local marker="$BUILD_ROOT/$BUILD_MARKER_NAME"
   if [[ -d "$BUILD_ROOT" && ! -f "$marker" ]] \
     && [[ -n "$(find "$BUILD_ROOT" -mindepth 1 -maxdepth 1 -print -quit)" ]]; then
-    die "refusing to reuse non-empty unowned build directory: $BUILD_ROOT"
+    die "拒绝复用不属于本脚本的非空构建目录：$BUILD_ROOT"
   fi
   mkdir -p "$BUILD_ROOT" "$OUTPUT_DIR"
   printf '%s\n' "coding-tools-mcp standalone build directory" >"$marker"
@@ -97,11 +97,12 @@ platform_name() {
 
 verify_binary() {
   local binary="$OUTPUT_DIR/coding-tools-mcp"
-  [[ -x "$binary" ]] || die "standalone executable not found: $binary"
-  log "Verifying standalone executable"
-  "$binary" --version
+  [[ -x "$binary" ]] || die "未找到独立可执行程序：$binary"
+  log "正在验证独立可执行程序"
+  local version_output
+  version_output="$("$binary" --version)"
   "$binary" --help >/dev/null
-  echo "Standalone executable is ready: $binary"
+  echo "可执行程序验证成功：$binary（$version_output）"
 }
 
 write_checksums() {
@@ -117,40 +118,41 @@ write_checksums() {
     fi
   ) >"$checksum_file" || {
     rm -f -- "$checksum_file"
-    log "sha256sum/shasum not found; skipping SHA256SUMS"
+    log "未找到 sha256sum 或 shasum，跳过生成 SHA256SUMS"
   }
 }
 
 build_standalone() {
   validate_output_paths
   local python version platform stage bundle_dir archive package_spec
-  python="$(find_python)" || die "Python 3.11 or newer is required"
+  python="$(find_python)" || die "需要 Python 3.11 或更高版本"
   "$python" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)' \
-    || die "Python 3.11 or newer is required"
+    || die "需要 Python 3.11 或更高版本"
   version="$(project_version)"
-  [[ -n "$version" ]] || die "could not read project version"
+  [[ -n "$version" ]] || die "无法读取项目版本"
   platform="$(platform_name)"
 
-  log "Preparing isolated build environment"
+  log "正在准备隔离构建环境"
   prepare_build_directory
   if [[ ! -x "$BUILD_ROOT/venv/bin/python" ]]; then
     "$python" -m venv "$BUILD_ROOT/venv"
   fi
-  "$BUILD_ROOT/venv/bin/python" -m pip install --upgrade pip pyinstaller
+  "$BUILD_ROOT/venv/bin/python" -m pip install --quiet --upgrade pip pyinstaller
   package_spec="$REPO_ROOT"
   if [[ "$WITH_IMAGE" == "1" ]]; then
     package_spec="${REPO_ROOT}[image]"
   fi
-  "$BUILD_ROOT/venv/bin/python" -m pip install --upgrade "$package_spec"
+  "$BUILD_ROOT/venv/bin/python" -m pip install --quiet --upgrade "$package_spec"
 
   stage="$BUILD_ROOT/stage"
   rm -rf -- "$stage" "$BUILD_ROOT/work" "$BUILD_ROOT/spec"
   mkdir -p "$stage" "$BUILD_ROOT/work" "$BUILD_ROOT/spec"
 
-  log "Building one-file executable"
+  log "正在构建单文件可执行程序"
   "$BUILD_ROOT/venv/bin/pyinstaller" \
     --noconfirm \
     --clean \
+    --log-level WARN \
     --onefile \
     --name coding-tools-mcp \
     --distpath "$stage" \
@@ -177,15 +179,15 @@ build_standalone() {
 
   cat <<EOF
 
-Build completed
+构建完成
 
-Executable:
+可执行程序：
   $OUTPUT_DIR/coding-tools-mcp
 
-Interactive operations:
+交互式运维入口：
   sudo $OUTPUT_DIR/coding-tools-mcp-admin
 
-Deployment archive:
+部署压缩包：
   $archive
 EOF
 }
@@ -195,7 +197,7 @@ clean_build() {
   if [[ -f "$BUILD_ROOT/$BUILD_MARKER_NAME" ]]; then
     rm -rf -- "$BUILD_ROOT"
   else
-    log "Skipping unowned build directory: $BUILD_ROOT"
+    log "跳过不属于本脚本的构建目录：$BUILD_ROOT"
   fi
   if [[ -f "$OUTPUT_DIR/$OUTPUT_MARKER_NAME" ]]; then
     rm -f -- \
@@ -206,36 +208,36 @@ clean_build() {
       "$OUTPUT_DIR/$OUTPUT_MARKER_NAME" \
       "$OUTPUT_DIR"/coding-tools-mcp-*.tar.gz
   else
-    log "Skipping unowned output directory: $OUTPUT_DIR"
+    log "跳过不属于本脚本的输出目录：$OUTPUT_DIR"
   fi
-  echo "Standalone build outputs removed."
+  echo "独立构建产物已清理。"
 }
 
 interactive_menu() {
-  [[ -t 0 && -t 1 ]] || die "no command supplied and no interactive terminal is available; use --help"
+  [[ -t 0 && -t 1 ]] || die "未提供命令且当前没有交互终端；请使用 --help 查看用法"
   while true; do
     cat <<'EOF'
 
-Coding Tools MCP standalone builder
+Coding Tools MCP 独立程序构建工具
 
-  1) Build executable
-  2) Build executable with image support
-  3) Verify existing executable
-  4) Clean build outputs
-  0) Exit
+  1) 构建可执行程序
+  2) 构建可执行程序（包含图片支持）
+  3) 验证现有可执行程序
+  4) 清理构建产物
+  0) 退出
 EOF
     local choice
-    read -r -p "Select [0-4]: " choice
+    read -r -p "请选择 [0-4]：" choice
     case "$choice" in
       1) WITH_IMAGE=0; build_standalone ;;
       2) WITH_IMAGE=1; build_standalone ;;
       3) verify_binary ;;
       4)
-        read -r -p "Remove standalone build outputs? [y/N] " choice
-        [[ "$choice" =~ ^[Yy]([Ee][Ss])?$ ]] && clean_build
+        read -r -p "确定清理独立构建产物吗？[y/N/是/否] " choice
+        [[ "$choice" =~ ^[Yy]([Ee][Ss])?$ || "$choice" == "是" ]] && clean_build
         ;;
       0) return ;;
-      *) echo "Invalid selection." >&2 ;;
+      *) echo "无效选项，请重新输入。" >&2 ;;
     esac
   done
 }
@@ -249,12 +251,12 @@ while [[ $# -gt 0 ]]; do
       WITH_IMAGE=1
       ;;
     --output-dir)
-      [[ $# -ge 2 ]] || die "--output-dir requires a value"
+      [[ $# -ge 2 ]] || die "--output-dir 需要提供路径"
       OUTPUT_DIR="$2"
       shift
       ;;
     --python)
-      [[ $# -ge 2 ]] || die "--python requires a value"
+      [[ $# -ge 2 ]] || die "--python 需要提供解释器路径"
       PYTHON_BIN="$2"
       shift
       ;;
@@ -263,7 +265,7 @@ while [[ $# -gt 0 ]]; do
       exit 0
       ;;
     *)
-      die "unknown argument: $1"
+      die "未知参数：$1"
       ;;
   esac
   shift
@@ -274,5 +276,5 @@ case "$ACTION" in
   build) build_standalone ;;
   verify) verify_binary ;;
   clean) clean_build ;;
-  *) die "unknown action: $ACTION" ;;
+  *) die "未知操作：$ACTION" ;;
 esac
