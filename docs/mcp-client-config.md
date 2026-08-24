@@ -162,14 +162,20 @@ neither require an external authenticated proxy. See [Remote MCP](remote-mcp.md)
 
 ## ChatGPT
 
-ChatGPT is a cloud client: it cannot launch a local process, so it needs the
-authenticated HTTPS tunnel from [Remote MCP](#remote-mcp), and its custom
-connectors offer OAuth or no authentication — there is no static bearer
-header to enter.
+ChatGPT is a cloud client: it cannot launch a local process, so it needs an
+authenticated HTTPS endpoint from [Remote MCP](#remote-mcp), and its custom
+connectors offer OAuth or no authentication — there is no static bearer header
+to enter. A Quick Tunnel is suitable for testing; a long-lived connector should
+use the persistent systemd deployment with a stable domain and rotating refresh
+tokens.
 
 ```bash
 CODING_TOOLS_MCP_AUTH_MODE=oauth integrations/tunnels/tunnel.sh cloudflared /path/to/repo
 ```
+
+For a stable server, use `scripts/install.sh --persistent --public-url
+https://mcp.example.com` and point ChatGPT at
+`https://mcp.example.com/mcp`.
 
 In ChatGPT, enable developer mode (Settings → Connectors → Advanced
 settings), then create a custom connector pointing at
