@@ -4,6 +4,9 @@
 
 - Moved the source-checkout tunnel launchers to `integrations/tunnels/` so user-facing runtime integrations no longer live under repository-maintenance scripts. The previously documented `scripts/tunnel.sh` entry point remains as a compatibility wrapper.
 - Organized repository-owned components by responsibility: the npm launcher now lives in `packages/npm-launcher/`, the Cloudflare sandbox control plane in `infra/cloudflare/sandbox-control/`, and promo-video sources in `media/promo-video/`.
+- Persisted RFC 7591 OAuth client registrations and rotating, revocable refresh tokens in a versioned SQLite database. Access tokens now default to one hour, refresh tokens to 90 days, and the legacy `CODING_TOOLS_MCP_OAUTH_TOKEN_TTL` remains an access-token TTL alias.
+- Added an upgrade-safe `scripts/install.sh --persistent` systemd deployment with a stable `--public-url`, loopback binding, mode-`0600` configuration, retained OAuth secrets/state, status checks, and state-preserving uninstall/purge behavior. Quick Tunnel launchers remain available for temporary deployments.
+- Added an interactive PyInstaller standalone builder and a server operations menu for install/update, start, stop, restart, status, logs, configuration, safe uninstall, and explicit purge.
 
 ## 0.3.0 - 2026-08-13
 

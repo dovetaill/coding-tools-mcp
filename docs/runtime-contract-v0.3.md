@@ -341,19 +341,23 @@ have a TTL. POSIX `tty=true` uses a real pseudo-terminal; Windows reports
 Non-loopback deployment requires bearer or OAuth authentication unless the
 operator explicitly selects no-auth. OAuth implements Authorization Code +
 PKCE S256, protected-resource metadata, authorization-server metadata, exact
-redirect URI matching, one-time five-minute codes, 24-hour access tokens, and
-RFC 7591 dynamic client registration at `POST /oauth/register`. Public and
-confidential clients are bound to their registered authentication method.
+redirect URI matching, one-time five-minute codes, one-hour access tokens,
+90-day rotating refresh tokens, and RFC 7591 dynamic client registration at
+`POST /oauth/register`. Public
+and confidential clients are bound to their registered authentication method.
 
 Authentication admits a client to the workspace; it does not partition it.
 Every admitted client of one workspace shares that workspace's commands,
 retained output, and patch state.
 
-Dynamic registrations and authorization codes are process-local; restarting
-the server requires clients to register again. Configure a stable
-`CODING_TOOLS_MCP_OAUTH_TOKEN_SECRET` and public server URL only when tokens must
-survive tunnel churn. Forwarded headers are ignored unless
-`CODING_TOOLS_MCP_TRUST_PROXY_HEADERS=1` is explicitly set.
+Dynamic registrations and refresh-token state are persisted in SQLite under
+`CODING_TOOLS_MCP_STATE_DIR`; authorization codes remain process-local and
+expire after five minutes. Refresh tokens are stored only as SHA-256 hashes,
+rotate on use, and trigger family revocation when an already-used token is
+presented again. A stable `CODING_TOOLS_MCP_OAUTH_TOKEN_SECRET` and public
+server URL let access and refresh flows survive server restarts. Forwarded
+headers are ignored unless `CODING_TOOLS_MCP_TRUST_PROXY_HEADERS=1` is
+explicitly set.
 
 ## Stable tool inventory
 

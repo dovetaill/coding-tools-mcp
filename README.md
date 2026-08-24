@@ -76,13 +76,37 @@ walkthroughs, and troubleshooting live in
 [docs/quickstart.md](docs/quickstart.md) and
 [docs/mcp-client-config.md](docs/mcp-client-config.md).
 
+### Quick Tunnel vs. Persistent Remote MCP
+
+Cloudflare Quick Tunnel is for temporary/testing deployments: its public URL
+can change after a restart. A long-lived ChatGPT connector should use a stable
+HTTPS domain, a loopback Nginx/Caddy reverse proxy target, persistent OAuth
+state, and systemd:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/dovetaill/coding-tools-mcp/main/scripts/install.sh | \
+  CODING_TOOLS_MCP_AUTH_MODE=oauth \
+  CODING_TOOLS_MCP_PERMISSION_MODE=dangerous \
+  bash -s -- \
+  --persistent \
+  --workspace /mulu \
+  --public-url https://cd.had.li
+```
+
+This mode binds to `127.0.0.1:8765`, installs
+`coding-tools-mcp.service`, keeps config and secrets in a mode-`0600` file, and
+persists dynamic OAuth clients plus rotating refresh tokens in SQLite. Repeat
+installations preserve authentication state. The complete Nginx, Certbot,
+upgrade, status, and uninstall instructions are in
+[Remote MCP](docs/remote-mcp.md#persistent-remote-mcp).
+
 ## Seven things to try
 
 **1. Make Claude Desktop your coding agent.** The config above is all it
 takes — the chat window you already pay for can now read, patch, test, and
 commit-review a real repository.
 
-**2. Code on your own machine from anywhere.**
+**2. Test remote access through a temporary tunnel.**
 
 ```bash
 CODING_TOOLS_MCP_AUTH_MODE=bearer ./integrations/tunnels/tunnel.sh cloudflared /path/to/repo
@@ -93,7 +117,8 @@ Microsoft Dev Tunnel). Point claude.ai on your phone at
 `https://<tunnel-host>/mcp` and drive your home workstation from anywhere.
 ChatGPT and Grok connect through their connector settings the same way.
 Bearer tokens and OAuth 2.1 + PKCE (with RFC 7591 dynamic registration) are
-built in. → [docs/remote-mcp.md](docs/remote-mcp.md)
+built in. For a connector that must survive restarts, use the persistent mode
+above. → [docs/remote-mcp.md](docs/remote-mcp.md)
 
 **3. Let an agent loose on untrusted code — inside a disposable sandbox.**
 
@@ -225,3 +250,42 @@ Author: Coding Tools MCP Contributors
 Source: https://github.com/xyTom/coding-tools-mcp
 
 Citation metadata is available in [CITATION.cff](CITATION.cff).
+
+## One-click build and server operations
+
+Run the standalone builder without arguments to open its interactive menu:
+
+```bash
+./scripts/build-standalone.sh
+```
+
+It produces a single executable plus a deployment archive under `dist/`.
+The binary targets the operating system and CPU architecture on which it was
+built. A non-interactive build is also available:
+
+```bash
+./scripts/build-standalone.sh build
+# Add --with-image to bundle the optional Pillow image support.
+```
+
+For day-to-day systemd operations, open the administrator menu:
+
+```bash
+sudo ./integrations/server/manage.sh
+```
+
+The menu provides install/update, start, stop, restart, status, logs,
+configuration changes, safe uninstall, and explicit purge. Commands can also
+be called directly:
+
+```bash
+sudo ./integrations/server/manage.sh status
+sudo ./integrations/server/manage.sh restart
+sudo ./integrations/server/manage.sh logs-follow
+sudo ./integrations/server/manage.sh configure
+```
+
+For this server, choose `/mulu`, `https://cd.had.li`, `127.0.0.1`, port
+`8765`, OAuth, and the required permission mode in the menu. A normal
+`uninstall` preserves `/etc/coding-tools-mcp` and `/var/lib/coding-tools-mcp`;
+only `purge` deletes OAuth clients, refresh tokens, and secrets.
