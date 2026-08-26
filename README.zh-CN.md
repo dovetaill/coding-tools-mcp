@@ -177,6 +177,12 @@ coding-tools-mcp-desktop
 [SECURITY.md](SECURITY.md) · [docs/security-boundary.md](docs/security-boundary.md) ·
 [docs/permission-modes.md](docs/permission-modes.md)
 
+持久服务把权限策略和文件系统隔离分开配置：
+`CODING_TOOLS_MCP_PERMISSION_MODE` 控制命令策略，
+`CODING_TOOLS_MCP_FILESYSTEM_ISOLATION=auto|landlock|none` 控制 Landlock。
+额外工具链目录通过 `CODING_TOOLS_MCP_EXEC_ALLOW_ROOTS` 配置，使用 `:`
+分隔绝对路径；工作区始终是主要可写根目录。
+
 ## 遥测
 
 服务器会发送匿名使用遥测（每工具的成功率/延迟计数与版本/平台维度——
@@ -274,8 +280,8 @@ sudo ./integrations/server/manage.sh configure
 “安装 / 更新”会先更新程序和运维脚本：源码仓库使用 `git pull --ff-only`，
 独立部署包则下载 GitHub 最新 Release 并验证 SHA-256，然后才重装并重启服务。
 
-当前服务器在菜单中填写 `/path/to/workspace`、`https://mcp.example.com`、`127.0.0.1`、端口
-`8765`、OAuth 和需要的权限模式即可；首次安装时公网网址默认就是
-`https://mcp.example.com`。普通 `uninstall` 会保留
+持久服务请在菜单中填写工作目录（例如 `/path/to/workspace`）、公网网址
+（例如 `https://mcp.example.com`）、`127.0.0.1`、端口 `8765`、OAuth 和
+需要的权限模式。公网网址必须显式配置，并会在更新时保留。普通 `uninstall` 会保留
 `/etc/coding-tools-mcp` 与 `/var/lib/coding-tools-mcp`；只有 `purge` 才会删除
 OAuth client、refresh token 和密钥。

@@ -6,7 +6,6 @@ ORIGINAL_ARGS=("$@")
 SERVICE_NAME="${CODING_TOOLS_MCP_SERVICE_NAME:-coding-tools-mcp}"
 CONFIG_DIR="${CODING_TOOLS_MCP_CONFIG_DIR:-/etc/coding-tools-mcp}"
 ENV_FILE="${CODING_TOOLS_MCP_ENV_FILE:-$CONFIG_DIR/coding-tools-mcp.env}"
-DEFAULT_PUBLIC_URL="${CODING_TOOLS_MCP_DEFAULT_PUBLIC_URL:-https://mcp.example.com}"
 RELEASE_REPOSITORY="${CODING_TOOLS_MCP_RELEASE_REPOSITORY:-dovetaill/coding-tools-mcp}"
 RELEASE_BASE_URL="${CODING_TOOLS_MCP_RELEASE_BASE_URL:-https://github.com/$RELEASE_REPOSITORY/releases/latest/download}"
 SKIP_SELF_UPDATE="${CODING_TOOLS_MCP_SKIP_SELF_UPDATE:-0}"
@@ -17,8 +16,11 @@ HOST=""
 PORT=""
 AUTH_MODE=""
 PERMISSION_MODE=""
+FILESYSTEM_ISOLATION=""
+EXEC_ALLOW_ROOTS=""
 SERVICE_USER=""
 NEW_OAUTH_PASSWORD=""
+EXEC_ALLOW_ROOTS_EXPLICIT=""
 
 if [[ -x "$SCRIPT_DIR/install.sh" && -x "$SCRIPT_DIR/coding-tools-mcp" ]]; then
   INSTALLER="$SCRIPT_DIR/install.sh"
@@ -45,6 +47,8 @@ usage() {
   stop                  停止服务
   restart               重启服务
   status                查看服务和非敏感配置状态
+  config                查看完整非敏感配置
+  show-secrets          交互确认后显示敏感配置
   logs                  查看最近 100 行服务日志
   logs-follow           持续查看日志，按 Ctrl-C 退出
   configure             交互式修改持久配置
@@ -58,11 +62,15 @@ usage() {
   --port 端口
   --auth-mode oauth|bearer                 认证方式
   --permission-mode safe|trusted|dangerous 权限等级
+  --filesystem-isolation auto|landlock|none 文件系统隔离
+  --exec-allow-roots 路径列表            额外 Landlock 读/执行目录（用 : 分隔）
   --service-user 用户
   -h, --help            显示本帮助
 
 OAuth 管理密码可在交互式配置中以隐藏输入方式修改，也可以通过
 CODING_TOOLS_MCP_OAUTH_PASSWORD 环境变量提供。
+
+普通 status/config 不显示密码或密钥；show-secrets 需要 root、交互终端和二次确认。
 EOF
 }
 
@@ -84,7 +92,18 @@ require_root() {
 config_value() {
   local key="$1"
   [[ -r "$ENV_FILE" ]] || return 0
-  bash -c 'set -a; source "$1"; printf "%s" "${!2-}"' bash "$ENV_FILE" "$key"
+  local line value
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ "$line" == "$key="* ]] || continue
+    value="${line#"$key="}"
+    if [[ "$value" == \"* && "$value" == *\" ]]; then
+      value="${value:1:${#value}-2}"
+      value="${value//\\\"/\"}"
+      value="${value//\\\\/\\}"
+    fi
+    printf '%s' "$value"
+    return
+  done < "$ENV_FILE"
 }
 
 unit_value() {
@@ -124,29 +143,124 @@ prompt_choice() {
   done
 }
 
+normalize_exec_root() {
+  local input="$1" resolved
+  [[ "$input" == /* ]] || {
+    echo "额外目录必须是绝对路径：$input" >&2
+    return 1
+  }
+  [[ -d "$input" ]] || {
+    echo "额外目录不存在或不是目录：$input" >&2
+    return 1
+  }
+  resolved="$(cd -- "$input" && pwd -P)"
+  case "$resolved" in
+    /|/root|/home|/var|/etc|/tmp)
+      echo "拒绝过宽的额外目录：$resolved" >&2
+      return 1
+      ;;
+  esac
+  printf '%s' "$resolved"
+}
+
+edit_exec_allow_roots() {
+  local action index path normalized joined
+  local -a roots=()
+  if [[ -n "$EXEC_ALLOW_ROOTS" ]]; then
+    IFS=: read -r -a roots <<< "$EXEC_ALLOW_ROOTS"
+  fi
+  while true; do
+    echo
+    echo "额外 Landlock 读/执行目录："
+    if ((${#roots[@]} == 0)); then
+      echo "  （无）"
+    else
+      for index in "${!roots[@]}"; do
+        echo "  $((index + 1))) ${roots[$index]}"
+      done
+    fi
+    read -r -p "操作 [a=添加 e=编辑 d=删除 c=完成]：" action
+    case "$action" in
+      a|A)
+        read -r -p "新增绝对目录：" path
+        if normalized="$(normalize_exec_root "$path")"; then
+          roots+=("$normalized")
+        fi
+        ;;
+      e|E)
+        read -r -p "编辑第几项：" index
+        if [[ "$index" =~ ^[0-9]+$ ]] && (( index >= 1 && index <= ${#roots[@]} )); then
+          read -r -p "新的绝对目录：" path
+          if normalized="$(normalize_exec_root "$path")"; then
+            roots[$((index - 1))]="$normalized"
+          fi
+        else
+          echo "无效的目录编号。" >&2
+        fi
+        ;;
+      d|D)
+        read -r -p "删除第几项：" index
+        if [[ "$index" =~ ^[0-9]+$ ]] && (( index >= 1 && index <= ${#roots[@]} )); then
+          unset 'roots[index-1]'
+          roots=("${roots[@]}")
+        else
+          echo "无效的目录编号。" >&2
+        fi
+        ;;
+      c|C|"")
+        break
+        ;;
+      *) echo "无效操作，请选择 a、e、d 或 c。" >&2 ;;
+    esac
+  done
+  if ((${#roots[@]} > 0)); then
+    IFS=: joined="${roots[*]}"
+    EXEC_ALLOW_ROOTS="$joined"
+  else
+    EXEC_ALLOW_ROOTS=""
+  fi
+  EXEC_ALLOW_ROOTS_EXPLICIT=1
+}
+
+secret_summary() {
+  local value="$1" label="$2"
+  if [[ -n "$value" ]]; then
+    printf '%s：已设置（长度 %d）' "$label" "${#value}"
+  else
+    printf '%s：未设置' "$label"
+  fi
+}
+
 collect_configuration() {
   local current_workspace current_url current_host current_port current_auth
-  local current_permission current_user change_password
+  local current_permission current_user current_state current_isolation
   current_workspace="$(config_value CODING_TOOLS_MCP_WORKSPACE)"
   current_url="$(config_value CODING_TOOLS_MCP_SERVER_URL)"
   current_host="$(config_value CODING_TOOLS_MCP_HOST)"
   current_port="$(config_value CODING_TOOLS_MCP_PORT)"
   current_auth="$(config_value CODING_TOOLS_MCP_AUTH_MODE)"
   current_permission="$(config_value CODING_TOOLS_MCP_PERMISSION_MODE)"
+  current_state="$(config_value CODING_TOOLS_MCP_STATE_DIR)"
+  current_isolation="$(config_value CODING_TOOLS_MCP_FILESYSTEM_ISOLATION)"
+  EXEC_ALLOW_ROOTS="$(config_value CODING_TOOLS_MCP_EXEC_ALLOW_ROOTS)"
   current_user="$(unit_value User)"
 
-  prompt_value WORKSPACE "工作目录" "${WORKSPACE:-${current_workspace:-$PWD}}" 1
+  prompt_value WORKSPACE "工作目录" "${WORKSPACE:-${current_workspace:-${current_state:-/var/lib/coding-tools-mcp}/workspace}}" 1
   prompt_value PUBLIC_URL "固定公网网址" \
-    "${PUBLIC_URL:-${current_url:-$DEFAULT_PUBLIC_URL}}" 1
+    "${PUBLIC_URL:-${current_url:-}}" 1
   prompt_value HOST "监听地址" "${HOST:-${current_host:-127.0.0.1}}" 1
   prompt_value PORT "监听端口" "${PORT:-${current_port:-8765}}" 1
   prompt_choice AUTH_MODE "认证模式（oauth=网页登录，bearer=固定令牌）" \
     "${AUTH_MODE:-${current_auth:-oauth}}" "oauth bearer"
   prompt_choice PERMISSION_MODE "权限模式（safe=安全，trusted=信任，dangerous=危险）" \
     "${PERMISSION_MODE:-${current_permission:-safe}}" "safe trusted dangerous"
+  prompt_choice FILESYSTEM_ISOLATION "文件系统隔离（auto=自动，landlock=必须，none=关闭）" \
+    "${FILESYSTEM_ISOLATION:-${current_isolation:-auto}}" "auto landlock none"
+  edit_exec_allow_roots
   prompt_value SERVICE_USER "服务运行用户" "${SERVICE_USER:-${current_user:-${SUDO_USER:-root}}}" 1
 
   if [[ "$AUTH_MODE" == "oauth" ]]; then
+    local change_password
     read -r -p "是否修改 OAuth 管理密码？[y/N/是/否] " change_password
     if [[ "$change_password" =~ ^[Yy]([Ee][Ss])?$ || "$change_password" == "是" ]]; then
       while [[ -z "$NEW_OAUTH_PASSWORD" ]]; do
@@ -309,6 +423,10 @@ run_install() {
   [[ -n "$PORT" ]] && args+=(--port "$PORT")
   [[ -n "$AUTH_MODE" ]] && args+=(--auth-mode "$AUTH_MODE")
   [[ -n "$PERMISSION_MODE" ]] && args+=(--permission-mode "$PERMISSION_MODE")
+  [[ -n "$FILESYSTEM_ISOLATION" ]] && args+=(--filesystem-isolation "$FILESYSTEM_ISOLATION")
+  if [[ "$interactive" == "1" || -n "$EXEC_ALLOW_ROOTS_EXPLICIT" ]]; then
+    args+=(--exec-allow-roots "$EXEC_ALLOW_ROOTS")
+  fi
   [[ -n "$SERVICE_USER" ]] && args+=(--service-user "$SERVICE_USER")
   if [[ -n "$NEW_OAUTH_PASSWORD" ]]; then
     env_args+=("CODING_TOOLS_MCP_OAUTH_PASSWORD=$NEW_OAUTH_PASSWORD")
@@ -332,7 +450,8 @@ state_zh() {
 
 show_status() {
   local service_state enabled_state status_host status_port status_url
-  local status_state status_workspace status_auth status_permission metadata_state database_state
+  local status_state status_workspace status_auth status_permission status_isolation status_roots
+  local status_password status_token_secret metadata_state database_state
   service_state="$(systemctl is-active "$SERVICE_NAME.service" 2>/dev/null || true)"
   enabled_state="$(systemctl is-enabled "$SERVICE_NAME.service" 2>/dev/null || true)"
   status_host="$(config_value CODING_TOOLS_MCP_HOST)"
@@ -342,6 +461,10 @@ show_status() {
   status_workspace="$(config_value CODING_TOOLS_MCP_WORKSPACE)"
   status_auth="$(config_value CODING_TOOLS_MCP_AUTH_MODE)"
   status_permission="$(config_value CODING_TOOLS_MCP_PERMISSION_MODE)"
+  status_isolation="$(config_value CODING_TOOLS_MCP_FILESYSTEM_ISOLATION)"
+  status_roots="$(config_value CODING_TOOLS_MCP_EXEC_ALLOW_ROOTS)"
+  status_password="$(config_value CODING_TOOLS_MCP_OAUTH_PASSWORD)"
+  status_token_secret="$(config_value CODING_TOOLS_MCP_OAUTH_TOKEN_SECRET)"
   database_state="不存在"
   if [[ -n "$status_state" && -f "$status_state/oauth.db" ]]; then
     database_state="可用"
@@ -360,10 +483,41 @@ show_status() {
 工作目录：    ${status_workspace:-未知}
 认证模式：    ${status_auth:-未知}
 权限模式：    ${status_permission:-未知}
+文件系统隔离：${status_isolation:-auto}
+额外执行目录：${status_roots:-无}
 公网网址：    ${status_url:-未知}
 OAuth 数据库：${status_state:-未知}/oauth.db（$database_state）
 OAuth 元数据：$metadata_state
+$(secret_summary "$status_password" "OAuth 管理密码")
+$(secret_summary "$status_token_secret" "OAuth 签名密钥")
 EOF
+}
+
+show_config() {
+  show_status
+  echo "配置文件：    $ENV_FILE"
+  echo "systemd 单元：${CODING_TOOLS_MCP_UNIT_FILE:-/etc/systemd/system/$SERVICE_NAME.service}"
+}
+
+show_sensitive_config() {
+  require_root
+  [[ -t 0 && -t 1 ]] || die "显示敏感配置需要交互式终端"
+  local answer password token_secret auth_token
+  read -r -p "即将显示密码和密钥，请确认不会录屏或复制。[y/N/是/否] " answer
+  [[ "$answer" =~ ^[Yy]([Ee][Ss])?$ || "$answer" == "是" ]] || {
+    echo "已取消。"
+    return 0
+  }
+  password="$(config_value CODING_TOOLS_MCP_OAUTH_PASSWORD)"
+  token_secret="$(config_value CODING_TOOLS_MCP_OAUTH_TOKEN_SECRET)"
+  auth_token="$(config_value CODING_TOOLS_MCP_AUTH_TOKEN)"
+  echo
+  echo "敏感配置（请勿复制到聊天、日志或 Git）："
+  printf 'CODING_TOOLS_MCP_OAUTH_PASSWORD=%s\n' "$password"
+  printf 'CODING_TOOLS_MCP_OAUTH_TOKEN_SECRET=%s\n' "$token_secret"
+  if [[ -n "$auth_token" ]]; then
+    printf 'CODING_TOOLS_MCP_AUTH_TOKEN=%s\n' "$auth_token"
+  fi
 }
 
 confirm_purge() {
@@ -403,6 +557,12 @@ run_action() {
     status)
       show_status
       ;;
+    config)
+      show_config
+      ;;
+    show-secrets)
+      show_sensitive_config
+      ;;
     logs)
       echo "最近 100 行服务日志："
       journalctl -u "$SERVICE_NAME.service" -n 100 --no-pager
@@ -441,10 +601,12 @@ Coding Tools MCP 服务器运维
   8) 修改配置
   9) 卸载（保留 OAuth 状态和配置）
  10) 永久清除（删除 OAuth 状态和配置）
+  11) 查看完整非敏感配置
+  12) 显示敏感配置（需确认）
   0) 退出
 EOF
     local choice
-    read -r -p "请选择 [0-10]：" choice
+    read -r -p "请选择 [0-12]：" choice
     case "$choice" in
       1) ACTION="update"; run_action ;;
       2) ACTION="start"; run_action ;;
@@ -462,6 +624,8 @@ EOF
         fi
         ;;
       10) ACTION="purge"; run_action || true ;;
+      11) ACTION="config"; run_action ;;
+      12) ACTION="show-secrets"; run_action ;;
       0) return ;;
       *) echo "无效选项，请重新输入。" >&2 ;;
     esac
@@ -470,7 +634,7 @@ EOF
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    install|update|start|stop|restart|status|logs|logs-follow|configure|uninstall|purge)
+    install|update|start|stop|restart|status|config|show-secrets|logs|logs-follow|configure|uninstall|purge)
       ACTION="$1"
       ;;
     --workspace)
@@ -501,6 +665,17 @@ while [[ $# -gt 0 ]]; do
     --permission-mode)
       [[ $# -ge 2 ]] || die "--permission-mode 需要提供权限模式"
       PERMISSION_MODE="$2"
+      shift
+      ;;
+    --filesystem-isolation)
+      [[ $# -ge 2 ]] || die "--filesystem-isolation 需要提供模式"
+      FILESYSTEM_ISOLATION="$2"
+      shift
+      ;;
+    --exec-allow-roots)
+      [[ $# -ge 2 ]] || die "--exec-allow-roots 需要提供路径列表"
+      EXEC_ALLOW_ROOTS="$2"
+      EXEC_ALLOW_ROOTS_EXPLICIT=1
       shift
       ;;
     --service-user)

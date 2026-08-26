@@ -97,6 +97,21 @@ curl -fsSL https://raw.githubusercontent.com/dovetaill/coding-tools-mcp/main/scr
   --public-url https://mcp.example.com
 ```
 
+Persistent installs default to an isolated workspace at
+`/var/lib/coding-tools-mcp/workspace` when `--workspace` is omitted. Existing
+configured workspaces are preserved on upgrades. Permission policy and
+filesystem isolation are independent:
+
+```text
+CODING_TOOLS_MCP_PERMISSION_MODE=dangerous
+CODING_TOOLS_MCP_FILESYSTEM_ISOLATION=auto
+CODING_TOOLS_MCP_EXEC_ALLOW_ROOTS=/path/to/toolchain:/opt/toolchain
+```
+
+`auto` uses Landlock when available, `landlock` requires it, and `none` turns
+filesystem isolation off. Extra roots are read/execute roots for
+`exec_command`; the workspace remains the primary writable root.
+
 Persistent mode:
 
 - binds to `127.0.0.1` unless `--host` explicitly overrides it;
@@ -125,6 +140,10 @@ curl https://mcp.example.com/.well-known/oauth-authorization-server
 curl https://mcp.example.com/.well-known/oauth-protected-resource
 ```
 
+The operations menu's normal status output reports configuration and secret
+presence without revealing values. Use `config` for the full non-sensitive
+summary and `show-secrets` only from a local root terminal after confirmation.
+
 Repeat the same `--persistent` command to upgrade. Existing config, signing
 secret, login password, registered clients, and refresh tokens are reused.
 From this fork's checkout or standalone deployment bundle, the Chinese
@@ -136,8 +155,8 @@ sudo ./integrations/server/manage.sh update
 
 Source checkouts use a fast-forward-only pull from `origin/main`. Standalone
 bundles download the stable-name archive from the latest `server-v*` GitHub
-Release and verify its SHA-256 checksum. The default first-install public URL
-for this fork is `https://mcp.example.com`; an existing configured URL always wins.
+Release and verify its SHA-256 checksum. The public URL is deployment-specific;
+an existing configured URL always wins.
 Normal uninstall keeps them:
 
 ```bash

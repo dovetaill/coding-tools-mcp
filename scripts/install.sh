@@ -9,12 +9,14 @@ WITH_IMAGE=0
 VERIFY=1
 ACTION="install"
 TUNNEL_PROVIDER="${CODING_TOOLS_MCP_TUNNEL_PROVIDER:-cloudflared}"
-WORKSPACE="${CODING_TOOLS_MCP_WORKSPACE:-$PWD}"
+WORKSPACE="${CODING_TOOLS_MCP_WORKSPACE:-}"
 PORT="${CODING_TOOLS_MCP_PORT:-8765}"
 HOST="${CODING_TOOLS_MCP_HOST:-127.0.0.1}"
 AUTH_MODE="${CODING_TOOLS_MCP_AUTH_MODE:-}"
 AUTH_TOKEN="${CODING_TOOLS_MCP_AUTH_TOKEN:-}"
 PERMISSION_MODE="${CODING_TOOLS_MCP_PERMISSION_MODE:-safe}"
+FILESYSTEM_ISOLATION="${CODING_TOOLS_MCP_FILESYSTEM_ISOLATION:-auto}"
+EXEC_ALLOW_ROOTS="${CODING_TOOLS_MCP_EXEC_ALLOW_ROOTS:-}"
 PUBLIC_URL="${CODING_TOOLS_MCP_SERVER_URL:-}"
 STATE_DIR="${CODING_TOOLS_MCP_STATE_DIR:-}"
 ACCESS_TOKEN_TTL="${CODING_TOOLS_MCP_OAUTH_ACCESS_TOKEN_TTL:-${CODING_TOOLS_MCP_OAUTH_TOKEN_TTL:-3600}}"
@@ -38,6 +40,8 @@ WORKSPACE_EXPLICIT="${CODING_TOOLS_MCP_WORKSPACE:+1}"
 HOST_EXPLICIT="${CODING_TOOLS_MCP_HOST:+1}"
 PORT_EXPLICIT="${CODING_TOOLS_MCP_PORT:+1}"
 PERMISSION_MODE_EXPLICIT="${CODING_TOOLS_MCP_PERMISSION_MODE:+1}"
+FILESYSTEM_ISOLATION_EXPLICIT="${CODING_TOOLS_MCP_FILESYSTEM_ISOLATION:+1}"
+EXEC_ALLOW_ROOTS_EXPLICIT="${CODING_TOOLS_MCP_EXEC_ALLOW_ROOTS:+1}"
 PUBLIC_URL_EXPLICIT="${CODING_TOOLS_MCP_SERVER_URL:+1}"
 STATE_DIR_EXPLICIT="${CODING_TOOLS_MCP_STATE_DIR:+1}"
 ACCESS_TOKEN_TTL_EXPLICIT="${CODING_TOOLS_MCP_OAUTH_ACCESS_TOKEN_TTL:+1}${CODING_TOOLS_MCP_OAUTH_TOKEN_TTL:+1}"
@@ -73,7 +77,8 @@ Install options:
   --no-verify                   Skip the post-install command check.
 
 Server options:
-  --workspace PATH              Workspace to expose. Default: current dir.
+  --workspace PATH              Workspace to expose. Persistent default:
+                                STATE_DIR/workspace; local default: current dir.
   --host HOST                   Bind host. Persistent default: 127.0.0.1.
   --port PORT                   Local HTTP port. Default: 8765.
   --public-url URL              Stable public HTTPS origin, without /mcp.
@@ -85,6 +90,8 @@ Server options:
                                 client_id/client_secret are optional.
   --auth-token TOKEN            Bearer token. Generated if needed.
   --permission-mode MODE        safe, trusted, or dangerous.
+  --filesystem-isolation MODE   auto, landlock, or none. Default: auto.
+  --exec-allow-roots PATHS      Colon-separated extra Landlock read/execute roots.
   --state-dir PATH              Persistent OAuth state directory.
   --service-user USER           Account used by the systemd service.
   --server-bin PATH             Use an existing coding-tools-mcp binary.
@@ -97,6 +104,8 @@ Environment:
   CODING_TOOLS_MCP_VERSION=0.2.0
   CODING_TOOLS_MCP_INSTALL_METHOD=auto|uv|pip
   CODING_TOOLS_MCP_WORKSPACE=/path/to/repo
+  CODING_TOOLS_MCP_FILESYSTEM_ISOLATION=auto|landlock|none
+  CODING_TOOLS_MCP_EXEC_ALLOW_ROOTS=/path/to/toolchain:/opt/toolchain
   CODING_TOOLS_MCP_TUNNEL_PROVIDER=cloudflared|ngrok|devtunnel
   CODING_TOOLS_MCP_INSTALL_SOURCE=/path/or/url
   CODING_TOOLS_MCP_AUTO_INSTALL_TUNNEL=1
@@ -378,7 +387,18 @@ require_root() {
 existing_config_value() {
   local key="$1"
   [[ -f "$ENV_FILE" ]] || return 0
-  bash -c 'set -a; source "$1"; printf "%s" "${!2-}"' bash "$ENV_FILE" "$key"
+  local line value
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ "$line" == "$key="* ]] || continue
+    value="${line#"$key="}"
+    if [[ "$value" == \"* && "$value" == *\" ]]; then
+      value="${value:1:${#value}-2}"
+      value="${value//\\\"/\"}"
+      value="${value//\\\\/\\}"
+    fi
+    printf '%s' "$value"
+    return
+  done < "$ENV_FILE"
 }
 
 use_existing_if_unset() {
@@ -413,6 +433,33 @@ PY
 )" || die "invalid --public-url"
 }
 
+validate_exec_allow_roots() {
+  local item resolved
+  local -a roots=() normalized=()
+  [[ "$EXEC_ALLOW_ROOTS" != *$'\n'* && "$EXEC_ALLOW_ROOTS" != *$'\r'* ]] \
+    || die "--exec-allow-roots must not contain newlines"
+  IFS=: read -r -a roots <<< "$EXEC_ALLOW_ROOTS"
+  for item in "${roots[@]}"; do
+    [[ -z "$item" ]] && continue
+    [[ "$item" == /* ]] || die "exec allow root must be an absolute path: $item"
+    [[ -d "$item" ]] || die "exec allow root does not exist or is not a directory: $item"
+    resolved="$(cd "$item" && pwd -P)"
+    case "$resolved" in
+      /|/root|/home|/var|/etc|/tmp)
+        die "refusing broad exec allow root: $resolved"
+        ;;
+    esac
+    normalized+=("$resolved")
+  done
+  if ((${#normalized[@]} > 0)); then
+    local joined
+    IFS=: joined="${normalized[*]}"
+    EXEC_ALLOW_ROOTS="$joined"
+  else
+    EXEC_ALLOW_ROOTS=""
+  fi
+}
+
 prepare_persistent_settings() {
   require_root
   STATE_DIR="${STATE_DIR:-/var/lib/coding-tools-mcp}"
@@ -422,6 +469,8 @@ prepare_persistent_settings() {
   use_existing_if_unset PORT "$PORT_EXPLICIT" CODING_TOOLS_MCP_PORT
   use_existing_if_unset AUTH_MODE "$AUTH_MODE_EXPLICIT" CODING_TOOLS_MCP_AUTH_MODE
   use_existing_if_unset PERMISSION_MODE "$PERMISSION_MODE_EXPLICIT" CODING_TOOLS_MCP_PERMISSION_MODE
+  use_existing_if_unset FILESYSTEM_ISOLATION "$FILESYSTEM_ISOLATION_EXPLICIT" CODING_TOOLS_MCP_FILESYSTEM_ISOLATION
+  use_existing_if_unset EXEC_ALLOW_ROOTS "$EXEC_ALLOW_ROOTS_EXPLICIT" CODING_TOOLS_MCP_EXEC_ALLOW_ROOTS
   use_existing_if_unset PUBLIC_URL "$PUBLIC_URL_EXPLICIT" CODING_TOOLS_MCP_SERVER_URL
   use_existing_if_unset STATE_DIR "$STATE_DIR_EXPLICIT" CODING_TOOLS_MCP_STATE_DIR
   use_existing_if_unset ACCESS_TOKEN_TTL "$ACCESS_TOKEN_TTL_EXPLICIT" CODING_TOOLS_MCP_OAUTH_ACCESS_TOKEN_TTL
@@ -437,12 +486,24 @@ prepare_persistent_settings() {
     safe|trusted|dangerous) ;;
     *) die "--permission-mode must be safe, trusted, or dangerous" ;;
   esac
+  case "$FILESYSTEM_ISOLATION" in
+    auto|landlock|none) ;;
+    *) die "--filesystem-isolation must be auto, landlock, or none" ;;
+  esac
   if [[ ! "$PORT" =~ ^[0-9]+$ ]] || (( PORT < 1 || PORT > 65535 )); then
     die "--port must be between 1 and 65535"
   fi
-  [[ -d "$WORKSPACE" ]] || die "workspace does not exist: $WORKSPACE"
-  WORKSPACE="$(cd "$WORKSPACE" && pwd -P)"
   id "$SERVICE_USER" >/dev/null 2>&1 || die "service user does not exist: $SERVICE_USER"
+  local service_group
+  service_group="$(id -gn "$SERVICE_USER")"
+  if [[ -z "$WORKSPACE" ]]; then
+    WORKSPACE="$STATE_DIR/workspace"
+    install -d -m 0700 -o "$SERVICE_USER" -g "$service_group" "$STATE_DIR" "$WORKSPACE"
+  else
+    [[ -d "$WORKSPACE" ]] || die "workspace does not exist: $WORKSPACE"
+  fi
+  WORKSPACE="$(cd "$WORKSPACE" && pwd -P)"
+  validate_exec_allow_roots
 
   if [[ "$HOST" != "127.0.0.1" && "$HOST" != "localhost" && "$HOST" != "::1" ]]; then
     echo "WARNING: persistent service will bind to non-loopback host $HOST; authentication and firewalling are mandatory." >&2
@@ -503,6 +564,8 @@ write_persistent_environment() {
   {
     printf 'CODING_TOOLS_MCP_AUTH_MODE='; systemd_env_quote "$AUTH_MODE"; printf '\n'
     printf 'CODING_TOOLS_MCP_PERMISSION_MODE='; systemd_env_quote "$PERMISSION_MODE"; printf '\n'
+    printf 'CODING_TOOLS_MCP_FILESYSTEM_ISOLATION='; systemd_env_quote "$FILESYSTEM_ISOLATION"; printf '\n'
+    printf 'CODING_TOOLS_MCP_EXEC_ALLOW_ROOTS='; systemd_env_quote "$EXEC_ALLOW_ROOTS"; printf '\n'
     printf 'CODING_TOOLS_MCP_WORKSPACE='; systemd_env_quote "$WORKSPACE"; printf '\n'
     printf 'CODING_TOOLS_MCP_HOST='; systemd_env_quote "$HOST"; printf '\n'
     printf 'CODING_TOOLS_MCP_PORT='; systemd_env_quote "$PORT"; printf '\n'
@@ -632,6 +695,7 @@ EOF
 show_persistent_status() {
   require_root
   local status_host status_port status_url status_state status_workspace status_auth status_permission
+  local status_isolation status_roots status_password status_token_secret
   status_host="$(existing_config_value CODING_TOOLS_MCP_HOST)"
   status_port="$(existing_config_value CODING_TOOLS_MCP_PORT)"
   status_url="$(existing_config_value CODING_TOOLS_MCP_SERVER_URL)"
@@ -639,12 +703,28 @@ show_persistent_status() {
   status_workspace="$(existing_config_value CODING_TOOLS_MCP_WORKSPACE)"
   status_auth="$(existing_config_value CODING_TOOLS_MCP_AUTH_MODE)"
   status_permission="$(existing_config_value CODING_TOOLS_MCP_PERMISSION_MODE)"
+  status_isolation="$(existing_config_value CODING_TOOLS_MCP_FILESYSTEM_ISOLATION)"
+  status_roots="$(existing_config_value CODING_TOOLS_MCP_EXEC_ALLOW_ROOTS)"
+  status_password="$(existing_config_value CODING_TOOLS_MCP_OAUTH_PASSWORD)"
+  status_token_secret="$(existing_config_value CODING_TOOLS_MCP_OAUTH_TOKEN_SECRET)"
   echo "Service: $SERVICE_NAME.service ($(systemctl is-active "$SERVICE_NAME.service" 2>/dev/null || true))"
   echo "Listen: ${status_host:-unknown}:${status_port:-unknown}"
   echo "Workspace: ${status_workspace:-unknown}"
   echo "Auth mode: ${status_auth:-unknown}"
   echo "Permission mode: ${status_permission:-unknown}"
+  echo "Filesystem isolation: ${status_isolation:-auto}"
+  echo "Extra exec roots: ${status_roots:-none}"
   echo "Public URL: ${status_url:-unknown}"
+  if [[ -n "$status_password" ]]; then
+    echo "OAuth password: configured (length ${#status_password})"
+  else
+    echo "OAuth password: not configured"
+  fi
+  if [[ -n "$status_token_secret" ]]; then
+    echo "OAuth token secret: configured (length ${#status_token_secret})"
+  else
+    echo "OAuth token secret: not configured"
+  fi
   if [[ -n "$status_state" && -f "$status_state/oauth.db" ]]; then
     echo "OAuth database: $status_state/oauth.db (available)"
   else
@@ -691,6 +771,8 @@ uninstall_persistent_service() {
 }
 
 resolve_runtime_defaults() {
+  WORKSPACE="${WORKSPACE:-$PWD}"
+  FILESYSTEM_ISOLATION="${FILESYSTEM_ISOLATION:-auto}"
   case "$ACTION" in
     install) ;;
     start)
@@ -727,6 +809,7 @@ server_args() {
     --host "$HOST"
     --port "$PORT"
     --permission-mode "$PERMISSION_MODE"
+    --filesystem-isolation "$FILESYSTEM_ISOLATION"
   )
   case "$AUTH_MODE" in
     bearer) args+=(--auth-token "$AUTH_TOKEN") ;;
@@ -1032,6 +1115,18 @@ while [[ $# -gt 0 ]]; do
       [[ $# -ge 2 ]] || die "--permission-mode requires a value"
       PERMISSION_MODE="$2"
       PERMISSION_MODE_EXPLICIT=1
+      shift
+      ;;
+    --filesystem-isolation)
+      [[ $# -ge 2 ]] || die "--filesystem-isolation requires a value"
+      FILESYSTEM_ISOLATION="$2"
+      FILESYSTEM_ISOLATION_EXPLICIT=1
+      shift
+      ;;
+    --exec-allow-roots)
+      [[ $# -ge 2 ]] || die "--exec-allow-roots requires a value"
+      EXEC_ALLOW_ROOTS="$2"
+      EXEC_ALLOW_ROOTS_EXPLICIT=1
       shift
       ;;
     --state-dir)

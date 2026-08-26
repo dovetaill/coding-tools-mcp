@@ -49,6 +49,8 @@ class ServerScriptTests(unittest.TestCase):
             "stop",
             "restart",
             "status",
+            "config",
+            "show-secrets",
             "logs",
             "configure",
             "uninstall",
@@ -84,13 +86,15 @@ class ServerScriptTests(unittest.TestCase):
             self.assertTrue(sentinel.is_file())
             self.assertIn("跳过不属于本脚本的构建目录", result.stderr)
 
-    def test_server_release_workflow_and_domain_default_are_wired(self) -> None:
+    def test_server_release_workflow_and_explicit_domain_configuration_are_wired(self) -> None:
         workflow = REPO_ROOT / ".github" / "workflows" / "server-release.yml"
         workflow_text = workflow.read_text(encoding="utf-8")
         manage_text = MANAGE_SCRIPT.read_text(encoding="utf-8")
         self.assertIn('tags: ["server-v*"]', workflow_text)
         self.assertIn("coding-tools-mcp-linux-x86_64.tar.gz", workflow_text)
-        self.assertIn("https://mcp.example.com", manage_text)
+        self.assertNotIn("had.li", manage_text)
+        self.assertIn("--filesystem-isolation", manage_text)
+        self.assertIn("--exec-allow-roots", manage_text)
         self.assertIn("releases/latest/download", manage_text)
 
     def test_bundle_update_downloads_verifies_and_installs_release(self) -> None:

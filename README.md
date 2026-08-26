@@ -194,6 +194,12 @@ a VM for genuinely untrusted work. Details:
 [SECURITY.md](SECURITY.md) · [docs/security-boundary.md](docs/security-boundary.md) ·
 [docs/permission-modes.md](docs/permission-modes.md)
 
+For persistent services, permission policy and filesystem isolation are
+configured independently with `CODING_TOOLS_MCP_PERMISSION_MODE` and
+`CODING_TOOLS_MCP_FILESYSTEM_ISOLATION=auto|landlock|none`. Add toolchain
+read/execute roots through `CODING_TOOLS_MCP_EXEC_ALLOW_ROOTS`, using `:` to
+separate absolute directories.
+
 ## Telemetry
 
 The server sends anonymous usage telemetry (per-tool success/latency counters
@@ -299,8 +305,9 @@ Update first fast-forwards a source checkout, or downloads and verifies the
 latest GitHub Release when running from a standalone bundle, before reinstalling
 and restarting the service.
 
-For this server, choose `/path/to/workspace`, `https://mcp.example.com`, `127.0.0.1`, port
-`8765`, OAuth, and the required permission mode in the menu. First-time setup
-defaults the public URL to `https://mcp.example.com`. A normal
+For a persistent server, choose a workspace such as `/path/to/workspace`, a
+public origin such as `https://mcp.example.com`, `127.0.0.1`, port `8765`,
+OAuth, and the required permission mode in the menu. The public URL is an
+explicit setting and is preserved across updates. A normal
 `uninstall` preserves `/etc/coding-tools-mcp` and `/var/lib/coding-tools-mcp`;
 only `purge` deletes OAuth clients, refresh tokens, and secrets.
