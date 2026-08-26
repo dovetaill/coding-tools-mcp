@@ -155,6 +155,7 @@ RISKY_ENV_NAMES = {
     "RUBYLIB",
 }
 SHELL_ENV_INHERIT_CHOICES = ("core", "all", "none")
+FILESYSTEM_ISOLATION_CHOICES = ("auto", "landlock", "none")
 
 
 @dataclass(frozen=True)
@@ -412,6 +413,7 @@ class WorkspaceMutationPolicy:
 @dataclass(frozen=True)
 class RuntimePolicy:
     permission_mode: str
+    filesystem_isolation: str
     shell_env_policy: ShellEnvPolicy
     allow_network: bool
     fake_readonly_annotations: bool = False
@@ -587,6 +589,24 @@ def permission_mode_from_args(args: argparse.Namespace) -> str:
     return "dangerous" if skip_all else mode
 
 
+def filesystem_isolation_from_args(args: argparse.Namespace) -> str:
+    raw_mode = (
+        getattr(args, "filesystem_isolation", None)
+        or os.environ.get(f"{ENV_PREFIX}_FILESYSTEM_ISOLATION")
+        or "auto"
+    )
+    mode = raw_mode.strip().lower()
+    if mode not in FILESYSTEM_ISOLATION_CHOICES:
+        supported = ", ".join(FILESYSTEM_ISOLATION_CHOICES)
+        raise ValueError(f"filesystem isolation must be one of: {supported}")
+    if mode == "landlock":
+        try:
+            landlock_abi_version()
+        except ToolFailure as exc:
+            raise ValueError(f"filesystem isolation landlock is unavailable: {exc.message}") from exc
+    return mode
+
+
 def fake_readonly_annotations_from_args(args: argparse.Namespace, permission_mode: str) -> bool:
     requested = bool(getattr(args, "dangerously_fake_readonly_annotations", False)) or truthy_env(
         os.environ.get(f"{ENV_PREFIX}_DANGEROUSLY_FAKE_READONLY_ANNOTATIONS")
@@ -619,6 +639,7 @@ def workspace_mutation_policy_from_args(args: argparse.Namespace) -> WorkspaceMu
 
 def runtime_policy_from_args(args: argparse.Namespace) -> RuntimePolicy:
     permission_mode = permission_mode_from_args(args)
+    filesystem_isolation = filesystem_isolation_from_args(args)
     allow_network = (
         PERMISSION_MODE_CAPABILITIES[permission_mode].network
         or bool(getattr(args, "allow_network", False))
@@ -626,6 +647,7 @@ def runtime_policy_from_args(args: argparse.Namespace) -> RuntimePolicy:
     )
     return RuntimePolicy(
         permission_mode=permission_mode,
+        filesystem_isolation=filesystem_isolation,
         shell_env_policy=shell_env_policy_from_args(args),
         allow_network=allow_network,
         fake_readonly_annotations=fake_readonly_annotations_from_args(args, permission_mode),
@@ -1488,6 +1510,7 @@ class Runtime:
         *,
         enable_view_image: bool = True,
         permission_mode: str = "safe",
+        filesystem_isolation: str | None = None,
         shell_env_policy: ShellEnvPolicy | None = None,
         allow_network: bool = False,
         auth_token: str | None = None,
@@ -1518,6 +1541,16 @@ class Runtime:
             )
         self.permission_mode = permission_mode
         self.capabilities = PERMISSION_MODE_CAPABILITIES[permission_mode]
+        self.filesystem_isolation = filesystem_isolation or (
+            "none" if permission_mode == "dangerous" else "auto"
+        )
+        if self.filesystem_isolation not in FILESYSTEM_ISOLATION_CHOICES:
+            raise ToolFailure(
+                "INVALID_ARGUMENT",
+                f"Unknown filesystem isolation: {self.filesystem_isolation}",
+                category="validation",
+                details={"supported": list(FILESYSTEM_ISOLATION_CHOICES)},
+            )
         self.dangerously_skip_all_permissions = self.capabilities.skip_all_permissions
         # Computed after the permission mode resolves: `gated_by` names a
         # runtime property, and one of the gates is the permission mode.
@@ -1700,7 +1733,7 @@ class Runtime:
         return "enabled" if self.capabilities.secret_env_filter else "disabled"
 
     def landlock_enabled(self) -> bool:
-        return self.capabilities.landlock
+        return self.filesystem_isolation != "none"
 
     def landlock_write_roots(self) -> list[Path]:
         roots = [self.runtime_dir]
@@ -1913,6 +1946,7 @@ class Runtime:
         return {
             "workspace": str(self.workspace.root),
             "permission_mode": self.permission_mode,
+            "filesystem_isolation": self.filesystem_isolation,
             "network_allowed": self.allow_network,
             "runtime_dir": str(self.runtime_dir),
             "home": str(self.command_home_dir()),
@@ -1926,6 +1960,7 @@ class Runtime:
     def server_info_payload(self) -> dict[str, Any]:
         tools = self.exposed_tool_names()
         landlock = landlock_status_payload()
+        landlock["requested"] = self.filesystem_isolation
         landlock["enabled"] = self._landlock_enforced(landlock)
         return {
             "server": SERVER_NAME,
@@ -7041,6 +7076,7 @@ def build_runtime(
         workspace,
         enable_view_image=args.enable_view_image,
         permission_mode=runtime_policy.permission_mode,
+        filesystem_isolation=runtime_policy.filesystem_isolation,
         shell_env_policy=runtime_policy.shell_env_policy,
         allow_network=runtime_policy.allow_network,
         auth_token=auth_token,
@@ -7352,6 +7388,15 @@ def build_parser() -> argparse.ArgumentParser:
             "workspace-relative directory that stays writable under "
             "--workspace-mutation structured-only; repeatable, and also settable as an "
             f"os.pathsep-separated {ENV_PREFIX}_WRITE_PATHS"
+        ),
+    )
+    parser.add_argument(
+        "--filesystem-isolation",
+        choices=FILESYSTEM_ISOLATION_CHOICES,
+        default=None,
+        help=(
+            "filesystem isolation: auto uses Landlock when available, landlock requires it, "
+            f"none disables it; defaults to {ENV_PREFIX}_FILESYSTEM_ISOLATION or auto"
         ),
     )
     parser.add_argument(

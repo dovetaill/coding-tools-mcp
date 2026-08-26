@@ -818,6 +818,27 @@ class RuntimeHelperTests(unittest.TestCase):
             self.assertNotIn("OPENAI_API_KEY", filtered_env)
             self.assertEqual(dangerous_env.get("OPENAI_API_KEY"), "sk-test-secret-value")
 
+    def test_filesystem_isolation_is_independent_from_permission_mode(self) -> None:
+        with TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            dangerous_landlock = Runtime(
+                workspace,
+                permission_mode="dangerous",
+                filesystem_isolation="auto",
+            )
+            dangerous_none = Runtime(
+                workspace,
+                permission_mode="dangerous",
+                filesystem_isolation="none",
+            )
+            try:
+                self.assertTrue(dangerous_landlock.landlock_enabled())
+                self.assertEqual(dangerous_landlock.filesystem_isolation, "auto")
+                self.assertFalse(dangerous_none.landlock_enabled())
+            finally:
+                dangerous_landlock.close()
+                dangerous_none.close()
+
     def test_landlock_device_access_includes_truncate_and_ioctl_bits(self) -> None:
         handled = server_module.landlock_handled_access(5)
         device_access = server_module.landlock_device_access(handled)
@@ -2595,6 +2616,17 @@ class FakeReadonlyAnnotationTests(unittest.TestCase):
         ):
             self.assertTrue(server_module.runtime_policy_from_args(args).fake_readonly_annotations)
         self.assertFalse(server_module.runtime_policy_from_args(args).fake_readonly_annotations)
+
+    def test_policy_from_args_keeps_filesystem_isolation_independent(self) -> None:
+        parser = server_module.build_parser()
+        args = parser.parse_args(["--permission-mode", "dangerous", "--filesystem-isolation", "none"])
+        policy = server_module.runtime_policy_from_args(args)
+        self.assertEqual(policy.permission_mode, "dangerous")
+        self.assertEqual(policy.filesystem_isolation, "none")
+
+        args = parser.parse_args(["--permission-mode", "dangerous"])
+        with patch.dict(os.environ, {"CODING_TOOLS_MCP_FILESYSTEM_ISOLATION": "none"}, clear=False):
+            self.assertEqual(server_module.runtime_policy_from_args(args).filesystem_isolation, "none")
 
     def test_override_over_http_requires_authentication(self) -> None:
         # A tunnel forwards to a loopback bind, so the bind host cannot tell a

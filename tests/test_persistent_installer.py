@@ -19,8 +19,8 @@ class PersistentInstallerTests(unittest.TestCase):
             self.skipTest("system-level installer test requires root")
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            workspace = root / "workspace"
-            workspace.mkdir()
+            extra_root = root / "toolchain"
+            extra_root.mkdir()
             fake_bin = root / "bin"
             fake_bin.mkdir()
             systemctl = fake_bin / "systemctl"
@@ -51,6 +51,7 @@ class PersistentInstallerTests(unittest.TestCase):
                 "CODING_TOOLS_MCP_UNIT_FILE": str(unit_file),
                 "CODING_TOOLS_MCP_AUTH_MODE": "oauth",
                 "CODING_TOOLS_MCP_PERMISSION_MODE": "dangerous",
+                "CODING_TOOLS_MCP_EXEC_ALLOW_ROOTS": str(extra_root),
                 "PYTHON": sys.executable,
             }
             command = [
@@ -58,8 +59,6 @@ class PersistentInstallerTests(unittest.TestCase):
                 "--persistent",
                 "--server-bin",
                 "/bin/true",
-                "--workspace",
-                str(workspace),
                 "--public-url",
                 "https://mcp.example.com/",
             ]
@@ -79,15 +78,30 @@ class PersistentInstallerTests(unittest.TestCase):
             self.assertEqual(stat.S_IMODE(state_dir.stat().st_mode), 0o700)
             self.assertIn('CODING_TOOLS_MCP_SERVER_URL="https://mcp.example.com"', first_config)
             self.assertIn('CODING_TOOLS_MCP_HOST="127.0.0.1"', first_config)
+            self.assertIn('CODING_TOOLS_MCP_FILESYSTEM_ISOLATION="auto"', first_config)
+            self.assertIn(f'CODING_TOOLS_MCP_EXEC_ALLOW_ROOTS="{extra_root}"', first_config)
             unit = unit_file.read_text(encoding="utf-8")
             self.assertIn("Restart=always", unit)
             self.assertIn(f"EnvironmentFile={env_file}", unit)
-            self.assertIn(f"WorkingDirectory={workspace}", unit)
+            default_workspace = state_dir / "workspace"
+            self.assertIn(f"WorkingDirectory={default_workspace}", unit)
             self.assertNotIn(f'EnvironmentFile="{env_file}"', unit)
             installed_bin = persistent_root / "bin" / "coding-tools-mcp"
             self.assertTrue(installed_bin.is_file())
             self.assertTrue(os.access(installed_bin, os.X_OK))
             self.assertIn(f'ExecStart="{installed_bin}"', unit)
+
+            marker = root / "config-parser-must-not-execute"
+            injected_password = f"$(touch {marker})"
+            poisoned_config = "\n".join(
+                (
+                    f'CODING_TOOLS_MCP_OAUTH_PASSWORD="{injected_password}"'
+                    if line.startswith("CODING_TOOLS_MCP_OAUTH_PASSWORD=")
+                    else line
+                )
+                for line in first_config.splitlines()
+            ) + "\n"
+            env_file.write_text(poisoned_config, encoding="utf-8")
 
             second_env = {
                 key: value
@@ -105,7 +119,8 @@ class PersistentInstallerTests(unittest.TestCase):
             )
             self.assertEqual(second.returncode, 0, second.stderr)
             self.assertNotIn("shown once", second.stdout)
-            self.assertEqual(env_file.read_text(encoding="utf-8"), first_config)
+            self.assertFalse(marker.exists())
+            self.assertIn(f'CODING_TOOLS_MCP_OAUTH_PASSWORD="{injected_password}"', env_file.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":
