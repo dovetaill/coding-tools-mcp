@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.3.1 - 2026-08-24
+## Unreleased
 
 The v0.5.0 reliability work. Migration notes:
 [docs/migration-0.5.md](docs/migration-0.5.md); rationale:
@@ -126,7 +126,7 @@ The v0.5.0 reliability work. Migration notes:
   one server process only; two servers on one workspace are protected by the
   pre-commit baseline recheck alone.
 
-### Other
+## 0.3.1 - 2026-08-24
 
 - Moved the source-checkout tunnel launchers to `integrations/tunnels/` so user-facing runtime integrations no longer live under repository-maintenance scripts. The previously documented `scripts/tunnel.sh` entry point remains as a compatibility wrapper.
 - Organized repository-owned components by responsibility: the npm launcher now lives in `packages/npm-launcher/`, the Cloudflare sandbox control plane in `infra/cloudflare/sandbox-control/`, and promo-video sources in `media/promo-video/`.
