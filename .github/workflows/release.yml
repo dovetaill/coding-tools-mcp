@@ -1,10 +1,10 @@
 name: release
 
-# One action releases: push a v<version> tag and everything below runs from
-# that single commit — evidence workflows, package builds, registry publishes,
-# and the GitHub Release. Evidence and publishes are jobs of this one run, so
-# the "same release commit" audit property holds by construction; no run ids,
-# no inputs, no branch/tag dispatch choices.
+# A release normally starts by pushing a v<version> tag. workflow_dispatch is
+# also available as a recovery/manual path: dispatch this workflow with the
+# release tag as the selected ref. In either case everything below runs from
+# that single tagged commit — evidence workflows, package builds, registry
+# publishes, and the GitHub Release.
 #
 # PyPI and npm trusted publishing must be configured with this workflow's
 # filename (release.yml) and the pypi / npm environments.
@@ -12,6 +12,7 @@ name: release
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -31,6 +32,13 @@ jobs:
         uses: actions/setup-python@v6.2.0
         with:
           python-version: "3.11"
+
+      - name: Require a release tag ref
+        run: |
+          if [[ "$GITHUB_REF" != refs/tags/v* ]]; then
+            echo "release must run from a v* tag ref, got $GITHUB_REF" >&2
+            exit 1
+          fi
 
       - name: Validate release metadata
         run: python scripts/check_release_versions.py --tag "$GITHUB_REF_NAME"
@@ -58,6 +66,11 @@ jobs:
   swebench-lite:
     name: Evidence
     uses: ./.github/workflows/swebench-lite.yml
+    with:
+      # SWE-bench is useful release evidence, but the official harness depends
+      # on mutable external infrastructure. Keep collecting its artifacts
+      # without allowing harness/environment drift to block a package release.
+      blocking: false
 
   build:
     name: Build distribution
@@ -147,8 +160,51 @@ jobs:
           name: python-package-distributions
           path: dist/
 
+      - name: Report distributions already published with different contents
+        run: |
+          python - <<'PY'
+          import glob
+          import hashlib
+          import json
+          import os
+          import urllib.error
+          import urllib.request
+
+          version = os.environ["GITHUB_REF_NAME"].removeprefix("v")
+          try:
+              with urllib.request.urlopen(
+                  f"https://pypi.org/pypi/coding-tools-mcp/{version}/json"
+              ) as response:
+                  published = {
+                      item["filename"]: item["digests"]["sha256"]
+                      for item in json.load(response)["urls"]
+                  }
+          except urllib.error.HTTPError as error:
+              if error.code != 404:
+                  raise
+              published = {}
+          for path in sorted(glob.glob("dist/*")):
+              name = os.path.basename(path)
+              if name not in published:
+                  continue
+              with open(path, "rb") as handle:
+                  digest = hashlib.sha256(handle.read()).hexdigest()
+              if digest == published[name]:
+                  print(f"{name}: already published, identical")
+              else:
+                  print(
+                      f"::warning::{name} is already on PyPI with different "
+                      "bytes (rebuilds are not byte-reproducible); "
+                      "skipping its upload"
+                  )
+          PY
+
       - name: Publish package distributions to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          # Recovery re-dispatches must be able to resume after PyPI already
+          # accepted the (immutable) files from an earlier run.
+          skip-existing: true
 
   pack-npm:
     name: Pack npm launcher

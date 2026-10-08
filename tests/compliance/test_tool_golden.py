@@ -105,7 +105,9 @@ class ApplyPatchGoldenTests(ComplianceTestCase):
         self.assertEqual(add_payload.get("additions"), 3)
         self.assertEqual(add_payload.get("removals"), 0)
         self.assertIn("Added by apply_patch", self.tool_text(self.client.call_tool("read_file", {"path": "docs/NOTES.md"})))
-        self.assert_tool_error("apply_patch", {"patch": add})
+        overwrite_payload = self.assert_tool_success(self.client.call_tool("apply_patch", {"patch": add}))
+        self.assertEqual(overwrite_payload.get("additions"), 3)
+        self.assertEqual(overwrite_payload.get("removals"), 3)
 
         with self.session_for_fixture("tiny-js-project") as (_workspace, client):
             dry_run_add = """*** Begin Patch
@@ -212,6 +214,30 @@ class ApplyPatchGoldenTests(ComplianceTestCase):
         self.assert_tool_success(self.client.call_tool("apply_patch", {"patch": move}))
         destination = self.workspace.root / "bin" / "run.sh"
         self.assertFalse(source.exists())
+        self.assertEqual(stat.S_IMODE(destination.stat().st_mode), 0o755)
+
+    def test_move_mode_survives_when_destination_content_returns_to_baseline(self) -> None:
+        source = self.workspace.root / "a.sh"
+        destination = self.workspace.root / "b.sh"
+        source.write_text("echo A\n", encoding="utf-8")
+        source.chmod(0o755)
+        destination.write_text("echo B\n", encoding="utf-8")
+        destination.chmod(0o644)
+        patch = """*** Begin Patch
+*** Update File: a.sh
+*** Move to: b.sh
+@@
+-echo A
++echo C
+*** Update File: b.sh
+@@
+-echo C
++echo B
+*** End Patch
+"""
+        self.assert_tool_success(self.client.call_tool("apply_patch", {"patch": patch}))
+        self.assertFalse(source.exists())
+        self.assertEqual(destination.read_text(encoding="utf-8"), "echo B\n")
         self.assertEqual(stat.S_IMODE(destination.stat().st_mode), 0o755)
 
     def test_apply_patch_rejects_absolute_traversal_and_symlink_escape(self) -> None:
@@ -324,6 +350,7 @@ class ExecAndGitGoldenTests(ComplianceTestCase):
         )
 
     def test_write_stdin_kill_command_git_status_and_git_diff(self) -> None:
+        self.require_pty()
         with self.session_for_fixture("long-running-project") as (_workspace, client):
             started = client.call_tool(
                 "exec_command",

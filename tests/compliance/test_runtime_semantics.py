@@ -38,6 +38,7 @@ class RuntimeSemanticsTests(ComplianceTestCase):
                             self.assertTrue(read.get("isError"), f"deleted path should be unreadable: {deleted}")
 
     def test_command_semantics_match_runtime_exec_and_stdin(self) -> None:
+        self.require_pty()
         with self.session_for_fixture("long-running-project") as (_workspace, client):
             started = client.call_tool(
                 "exec_command",
@@ -52,6 +53,7 @@ class RuntimeSemanticsTests(ComplianceTestCase):
 
     def test_missing_and_closed_commands_return_structured_errors(self) -> None:
         self.assert_denied_or_permission_required("write_stdin", {"command_id": "missing-command", "chars": "hello\n"})
+        self.require_pty()
         with self.session_for_fixture("long-running-project") as (_workspace, client):
             started = client.call_tool(
                 "exec_command",

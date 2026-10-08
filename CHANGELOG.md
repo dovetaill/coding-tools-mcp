@@ -2,6 +2,78 @@
 
 ## Unreleased
 
+### Fixed
+
+- Adjacent `@@` anchors must contain meaningful text before they count as
+  evidence that a patch was already applied. Punctuation-only anchors now
+  leave failed hunks as errors without partially writing other files.
+- The `apply_changes` schema and runtime contract consistently describe
+  matching `line`/`start_line` aliases with an explicit `end_line`, preserving
+  existing accepted inputs.
+- Model-visible text escapes non-UTF-8 filesystem characters instead of
+  raising an internal error. Structured paths retain the original characters
+  for lossless filesystem and JSON round trips.
+
+- Repeated tool failures now add a nonblocking, model-visible warning instead
+  of refusing the third call. External changes and other clients can recover
+  immediately; normal permission, path, schema, revision, and resource checks
+  still apply. Diagnostic details use `recent_identical_failures` and
+  `repeat_warning`, not the old consecutive-failure/blocking wording.
+  Actual repeated executions retain their original errors and telemetry counts.
+
+- Windows process-tree cleanup uses the absolute System32 `taskkill.exe` with
+  a system working directory and minimal environment, avoiding workspace/PATH
+  executable lookup and inheritance of server credentials.
+- Byte-limited `read_file` pages use physical LF, CRLF, or CR line boundaries,
+  keeping numbered text, reported ranges, and continuation lines consistent.
+
+- Dry runs from both write tools label their proposed revision as
+  `would_be_revision`. Invalid `tools/call` argument values, including empty
+  arrays, are rejected rather than treated as `{}`. Missing or `null` arguments
+  retain their existing empty-object behavior.
+  `read_output` text includes eviction warnings even on the final page.
+- **`apply_patch` no longer reports success it did not earn, and follows
+  Codex's locating rules.** A hunk counts as already applied only on strong
+  evidence: blank or punctuation-only lines (the stray blank context line, a
+  lone `}`) never count, so `@@ [server]` / `-timeout = 20` /
+  `+timeout = 30` no longer "succeeds" because `timeout = 30` appears under
+  `[client]`. As in Codex, an anchored hunk takes the first match after its
+  `@@` anchor (0.5.0 reported `PATCH_CONTEXT_AMBIGUOUS` and told the caller to
+  add the anchor it already had), consecutive `@@` lines are found in turn
+  (0.5.0 silently kept only the last), and `*** End of File` must match at the
+  tail. Additions/removals exclude skipped hunks. The 0.3 → 0.5 behavior
+  changes are now listed in [docs/migration-0.5.md](docs/migration-0.5.md).
+- **`apply_changes` contract is followable.** A revision may come from
+  `read_file` or the last write's result; `REVISION_MISMATCH` no longer hands
+  back the new revision (pasting it with stale line numbers edited the wrong
+  line); malformed revisions are `INVALID_ARGUMENT`; `read_file` gains
+  `line_numbers`; `line`/`start_line` shorthands are accepted where
+  unambiguous; an identical `create` is an idempotent success; untouched lines
+  keep their original line endings; no-op replaces report +0 -0.
+- **Interactive stdin works without a TTY.** `exec_command` gains
+  `keep_stdin_open`; writing to a command whose stdin is closed explains why
+  (`details.reason`) and how to recover. `output_refs` are always returned,
+  `read_output` accepts a bare command id plus `stream` and reports `status`
+  and `exit_code`. Retention TTL starts when a client first observes the
+  terminal state. Killing an exited command reports no signal. On Windows,
+  kill/timeout terminates the whole process tree, and backslash/drive paths in
+  commands are checked against the workspace boundary.
+- **Repeat-failure advice** ignores `INTERNAL_ERROR`, resets after a
+  successful writing `exec_command`/`kill_command`, and forgets history after
+  60 s. Idempotency replays ignore arguments equal to their schema default.
+- **Telemetry**: events carry `install` and `build` (source hash) so modified
+  copies can be told apart from the published wheel; schema rejections are
+  counted as `err_INVALID_PARAMS` (unknown tool names only in
+  `unknown_tool_calls`); `tool_summary` gains `already_applied`; a deliberate
+  kill is outcome `killed`, not a failure, and `running` is no longer counted
+  as an outcome; benchmarks and `make` targets default telemetry off.
+- **Legacy breaker telemetry remains separate.** Historical
+  `REPEATED_CALL_BLOCKED` refusals count only as `breaker_blocks`; current
+  Runtime emits advice instead and counts every real execution normally.
+  See [docs/telemetry.md](docs/telemetry.md) for cross-version comparisons.
+
+## 0.5.0 - 2026-09-14
+
 The v0.5.0 reliability work. Migration notes:
 [docs/migration-0.5.md](docs/migration-0.5.md); rationale:
 [docs/plan-v0.5.md](docs/plan-v0.5.md).
@@ -29,6 +101,11 @@ The v0.5.0 reliability work. Migration notes:
 
 ### Added
 
+- **Opt-in local tool event journal.** `CODING_TOOLS_MCP_EVENT_LOG_DIR` retains
+  metadata-only call start/end records in a bounded private JSONL ring across
+  restarts. HTTP and stdio share the same coverage; existing TRACE and telemetry
+  are unchanged. See [operator guidance](docs/troubleshooting.md#durable-local-tool-events)
+  for failure handling, privacy, and task-handoff limits.
 - **`apply_changes`**, a line-addressed editing tool. Each change names an
   action (`create`, `write`, `edit`, `delete`, `move`, `copy`) and a path.
   Existing targets use the `revision` `read_file` reported. `write` is an
@@ -78,17 +155,16 @@ The v0.5.0 reliability work. Migration notes:
 
 ### Changed
 
-- **`apply_patch` locates hunks with more than context.** `@@ <scope>` headers
-  and `*** End of File` now participate in placing a hunk instead of being
-  ignored.
+- **`apply_patch` locates hunks with forward text anchors.** `@@ <context>`
+  advances a language-agnostic search cursor; it does not infer function or
+  block boundaries. `*** End of File` also participates in placement.
 - **Patch matching is graded** — exact, then ignoring trailing whitespace, then
   ignoring indentation width — and the grade actually used is reported in
   `match_quality`, so a downgrade is visible rather than silent.
 - **A successful patch returns evidence**: `changed_ranges`, a per-file
   `revision`, and `total_lines`. These are evidence only; `apply_patch` still
   takes no `revision` argument, because its context lines are already its
-  optimistic check. For chained blocks, ranges describe the net original
-  baseline-to-final result rather than accumulated intermediate ranges.
+  optimistic check.
 - **A failed patch returns repair data**: the hunk index, nearby numbered text,
   and candidate match positions, so the next attempt can be aimed.
 - **A patch whose changes are already present reports `already_applied`**
@@ -99,10 +175,12 @@ The v0.5.0 reliability work. Migration notes:
   fails with `PATCH_CONTEXT_NOT_FOUND`. A `*** Move to:` that actually
   relocates the file remains a write and reports `already_applied: false` even
   when every hunk was already present.
-- **Same-path chaining in `apply_patch` is now promised.** Several
-  `*** Update File` blocks naming one path in one envelope chain in order. This
-  already worked and is now documented, unit-tested, and covered by
-  `make test-patch-repro` in CI.
+- **`apply_patch` now follows Codex primary-path and overwrite semantics.** An
+  operation's primary path may appear only once in an envelope, including
+  aliases such as `a.txt` and `./a.txt`. `Add File` may replace an existing
+  file, `Move to` may replace an existing destination, and distinct source
+  files may move to the same destination in order, with the later write
+  winning.
 - **`apply_changes` compares paths after resolving them**, so `a.txt` and
   `./a.txt` are one path: naming both is `INVALID_ARGUMENT` rather than a
   silent overwrite reported as two applied changes.
@@ -125,6 +203,50 @@ The v0.5.0 reliability work. Migration notes:
 - The runtime contract now states that `patch_lock` serializes patches within
   one server process only; two servers on one workspace are protected by the
   pre-commit baseline recheck alone.
+
+### Fixed
+
+- **Chained patch operations retain staged file state.** A newly moved
+  destination can be updated, deleted, or moved again in the same envelope,
+  and a later `Add File` overwrite preserves its staged executable mode.
+  Repeated destination writes keep the first baseline, so an intervening
+  external edit raises `PATCH_CONFLICT` instead of being overwritten.
+- **`apply_changes` no longer doubles carriage returns in CRLF replacement
+  content.** Replacement text now normalizes LF, CRLF, and CR separators before
+  the file's original line-ending convention is restored, so returned
+  `total_lines` and `changed_ranges` stay consistent with a subsequent
+  `read_file`.
+- **`@@ <context>` now follows Codex-style forward-cursor semantics.** Missing
+  anchors fail instead of being ignored, matching never jumps back before the
+  anchor/current cursor, top-level and brace-based code are not rejected by
+  indentation heuristics, and pure-addition hunks validate their anchor before
+  appending at EOF.
+- **Move evidence and breaker invalidation now follow actual staged
+  mutations.** Moves that change paths retain an explicit source deletion in
+  `affected_files`, and successful workspace-mutation invalidation is derived
+  from committed staged actions rather than compressed display evidence.
+- **Move mode preservation now survives later content reversion.** A staged
+  file is considered unchanged only when both its content and mode match the
+  original destination baseline, so an executable source moved over a
+  non-executable destination keeps its executable bit even if later patch
+  operations restore the destination's original bytes.
+- **Whole-file `apply_changes` evidence now reports line counts consistently.**
+  Rewriting identical content reports zero additions/removals, and replacement
+  ranges count removed lines from the original file. Bare-CR content is also
+  counted with the same universal-newline rules as `read_file` without
+  rewriting the user's bytes.
+- The long-running PTY compliance test now polls the bounded terminal stream
+  for final child output instead of assuming input echo and process output
+  arrive in one response.
+- Cloudflare local `.dev.vars*` and `.env*` files remain ignored after the
+  control-plane move to `infra/cloudflare/`.
+- Release-gate tests now distinguish unavailable Landlock/PTY host capabilities
+  from product behavior and no longer race the 16-command concurrency limit
+  while testing completed-command retention.
+- Regenerated `uv.lock` from the v0.5.0 release metadata, including the current
+  `mcp` and `PyYAML` development dependencies. The release checker now rejects
+  a checked-in uv lock whose project version or dev dependency set has drifted
+  from `pyproject.toml`.
 
 ## 0.3.1 - 2026-08-24
 

@@ -66,15 +66,15 @@ class Case:
 
 CASES: list[Case] = [
     Case(
-        name="C2 scope anchor on the @@ line",
+        name="C2 forward text anchor on the @@ line",
         why=(
-            "`@@ def farewell` must select the second of two identical bodies. "
-            "Parsed-and-discarded scope text made this PATCH_CONTEXT_AMBIGUOUS."
+            "`@@ def farewell(name):` must select the second of two identical bodies. "
+            "Parsed-and-discarded anchor text made this PATCH_CONTEXT_AMBIGUOUS."
         ),
         files={"app.py": DUPLICATE_BODY},
         patch="""*** Begin Patch
 *** Update File: app.py
-@@ def farewell
+@@ def farewell(name):
 -    print("hello")
 +    print("bye")
 *** End Patch
@@ -175,8 +175,11 @@ CASES: list[Case] = [
         expect_payload={"error_code": "PATCH_CONTEXT_NOT_FOUND", "has_nearby_text": True},
     ),
     Case(
-        name="D-2 same-path chaining inside one envelope",
-        why="Two updates to one path chain on the prior staged content; this is a promise now.",
+        name="D-2 duplicate primary paths are rejected before writes",
+        why=(
+            "The Codex tool entry rejects multiple operations that use the same primary path; "
+            "the whole envelope must fail before the first update is committed."
+        ),
         files={"app.py": "one\ntwo\n"},
         patch="""*** Begin Patch
 *** Update File: app.py
@@ -189,7 +192,7 @@ CASES: list[Case] = [
 +TWO
 *** End Patch
 """,
-        expect_contains={"app.py": "ONE\nTWO\n"},
+        expect_payload={"error_code": "PATCH_FAILED"},
     ),
     Case(
         name="C5 failure carries repair data",

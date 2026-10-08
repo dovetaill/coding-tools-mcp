@@ -210,6 +210,7 @@ class SecurityComplianceTests(ComplianceTestCase):
                 self.client.call_tool("kill_command", {"command_id": command_id, "signal": "KILL"})
 
     def test_exec_command_timeout_is_enforced_without_client_polling(self) -> None:
+        self.require_pty()
         started = self.client.call_tool(
             "exec_command",
             {
@@ -234,6 +235,7 @@ class SecurityComplianceTests(ComplianceTestCase):
         self.assertIs(poll_payload.get("timed_out"), True, poll_payload)
 
     def test_exec_command_long_running_output_buffer_is_bounded(self) -> None:
+        self.require_pty()
         started = self.client.call_tool(
             "exec_command",
             {

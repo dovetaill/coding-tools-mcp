@@ -29,6 +29,11 @@ on:
         required: false
         type: boolean
         default: true
+      blocking:
+        description: "Fail the workflow when the SWE-bench evaluation fails"
+        required: false
+        type: boolean
+        default: true
   workflow_call:
     inputs:
       instance_ids:
@@ -48,6 +53,10 @@ on:
         type: string
         default: reference_patch
       install_swebench:
+        required: false
+        type: boolean
+        default: true
+      blocking:
         required: false
         type: boolean
         default: true
@@ -76,6 +85,7 @@ jobs:
           docker info
 
       - name: Attempt SWE-bench Lite official evaluation
+        continue-on-error: ${{ inputs.blocking == false }}
         run: |
           ids="${{ inputs.instance_ids }}"
           args=()

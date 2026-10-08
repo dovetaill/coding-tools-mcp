@@ -36,6 +36,9 @@ class LineSemanticsTests(unittest.TestCase):
     def test_a_trailing_newline_adds_a_blank_line(self) -> None:
         self.assertEqual(content_lines("a\n"), ["a", ""])
 
+    def test_replacement_content_normalizes_crlf_and_cr(self) -> None:
+        self.assertEqual(content_lines("a\r\nb\rc"), ["a", "b", "c"])
+
     def test_line_counting_matches_read_file(self) -> None:
         self.assertEqual(split_lines("a\nb\n"), (["a", "b"], True))
         self.assertEqual(split_lines("a\nb"), (["a", "b"], False))
@@ -198,7 +201,7 @@ class ChangeParsingTests(unittest.TestCase):
         with self.assertRaises(ToolFailure) as raised:
             reject_duplicate_paths([(0, "a.txt"), (1, "a.txt")])
         self.assertEqual(raised.exception.code, "INVALID_ARGUMENT")
-        self.assertIn("apply_patch", raised.exception.message)
+        self.assertIn("Combine them into one change", raised.exception.message)
         self.assertEqual(raised.exception.details["change_indexes"], [0, 1])
 
     def test_a_destination_that_collides_with_another_change_is_refused(self) -> None:
@@ -257,7 +260,38 @@ class ApplyChangesRuntimeTests(unittest.TestCase):
         self.assertEqual(evidence["revision"], self.revision("a.txt"))
         self.assertEqual(evidence["total_lines"], 3)
 
-    def test_a_stale_revision_is_refused_with_the_current_one(self) -> None:
+    def test_crlf_replacement_content_keeps_bytes_and_line_evidence_consistent(self) -> None:
+        path = self.workspace / "windows.txt"
+        path.write_bytes(b"one\r\ntwo\r\n")
+        read_before = self.runtime.read_file({"path": "windows.txt"})
+
+        payload = self.runtime.apply_changes(
+            {
+                "changes": [
+                    {
+                        "action": "edit",
+                        "path": "windows.txt",
+                        "revision": read_before["revision"],
+                        "edits": [
+                            edit(op="replace", start_line=1, content="ONE\r\nINSERTED")
+                        ],
+                    }
+                ]
+            }
+        )
+
+        self.assertEqual(path.read_bytes(), b"ONE\r\nINSERTED\r\ntwo\r\n")
+        evidence = payload["affected_files"][0]
+        self.assertEqual(evidence["total_lines"], 3)
+        self.assertEqual(
+            evidence["changed_ranges"],
+            [{"start_line": 1, "end_line": 2, "added_lines": 2, "removed_lines": 1}],
+        )
+        read_after = self.runtime.read_file({"path": "windows.txt"})
+        self.assertEqual(read_after["total_lines"], 3)
+
+    def test_a_stale_revision_is_refused_without_the_current_one(self) -> None:
+        """Verify stale edits preserve file bytes and withhold the current revision from errors."""
         stale = self.revision("a.txt")
         (self.workspace / "a.txt").write_text("alpha\nbeta\ndelta\n", encoding="utf-8")
         with self.assertRaises(ToolFailure) as raised:
@@ -274,7 +308,11 @@ class ApplyChangesRuntimeTests(unittest.TestCase):
                 }
             )
         self.assertEqual(raised.exception.code, "REVISION_MISMATCH")
-        self.assertEqual(raised.exception.details["current_revision"], self.revision("a.txt"))
+        # The current revision is withheld: pasted back with the old line
+        # numbers it would edit the wrong line. read_file supplies both.
+        self.assertNotIn("current_revision", raised.exception.details)
+        self.assertNotIn(self.revision("a.txt"), raised.exception.message)
+        self.assertNotIn(self.revision("a.txt"), repr(raised.exception.details))
         self.assertEqual((self.workspace / "a.txt").read_text(encoding="utf-8"), "alpha\nbeta\ndelta\n")
 
     def test_the_revision_read_file_publishes_is_the_one_apply_changes_takes(self) -> None:

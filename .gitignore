@@ -19,6 +19,10 @@ cloudflare/**/.dev.vars
 cloudflare/**/.dev.vars.*
 cloudflare/**/.env
 cloudflare/**/.env.*
+infra/cloudflare/**/.dev.vars
+infra/cloudflare/**/.dev.vars.*
+infra/cloudflare/**/.env
+infra/cloudflare/**/.env.*
 reports/compliance/latest*.tmp
 rollout-*.jsonl
 successful_apply_patch_blocks.txt

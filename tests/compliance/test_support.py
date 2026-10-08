@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import unittest
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -36,6 +37,21 @@ class ComplianceTestCase(unittest.TestCase):
         self.assertIn("content", result, f"MCP tool result must contain content: {result!r}")
         self.assertIsInstance(result["content"], list, f"content must be a list: {result!r}")
         return structured_payload(result)
+
+    def require_pty(self) -> None:
+        """Skip a PTY-specific test when the host cannot allocate one."""
+
+        if os.name == "nt":
+            self.skipTest("this build explicitly reports ConPTY as unsupported")
+        import pty
+
+        try:
+            master, slave = pty.openpty()
+        except OSError as exc:
+            self.skipTest(f"host cannot allocate a pseudo-terminal: {exc}")
+        else:
+            os.close(master)
+            os.close(slave)
 
     def assert_tool_error(self, tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         try:

@@ -13,6 +13,13 @@ import tomllib
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def _canonical_requirement_name(requirement: str) -> str:
+    match = re.match(r"^[A-Za-z0-9][A-Za-z0-9._-]*", requirement)
+    if not match:
+        raise SystemExit(f"could not parse requirement name from {requirement!r}")
+    return re.sub(r"[-_.]+", "-", match.group(0)).lower()
+
+
 def validate_release(root: Path, tag: str) -> tuple[str, str]:
     pyproject = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
     project_version = pyproject["project"]["version"]
@@ -30,6 +37,39 @@ def validate_release(root: Path, tag: str) -> tuple[str, str]:
         raise SystemExit(
             f"pyproject version {project_version!r} does not match module version {module_version!r}"
         )
+
+    lock_path = root / "uv.lock"
+    if lock_path.exists():
+        lock = tomllib.loads(lock_path.read_text(encoding="utf-8"))
+        project_packages = [
+            package
+            for package in lock.get("package", [])
+            if package.get("name") == "coding-tools-mcp"
+            and package.get("source", {}).get("editable") == "."
+        ]
+        if len(project_packages) != 1:
+            raise SystemExit("uv.lock must contain exactly one editable coding-tools-mcp package")
+        locked_project = project_packages[0]
+        if locked_project.get("version") != project_version:
+            raise SystemExit(
+                f"uv.lock project version {locked_project.get('version')!r} "
+                f"does not match pyproject version {project_version!r}"
+            )
+        expected_dev = {
+            _canonical_requirement_name(requirement)
+            for requirement in pyproject.get("project", {})
+            .get("optional-dependencies", {})
+            .get("dev", [])
+        }
+        locked_dev = {
+            re.sub(r"[-_.]+", "-", str(item.get("name", ""))).lower()
+            for item in locked_project.get("optional-dependencies", {}).get("dev", [])
+        }
+        if locked_dev != expected_dev:
+            raise SystemExit(
+                "uv.lock dev dependencies do not match pyproject.toml: "
+                f"expected {sorted(expected_dev)!r}, got {sorted(locked_dev)!r}"
+            )
 
     changelog = (root / "CHANGELOG.md").read_text(encoding="utf-8")
     if not re.search(rf"^## {re.escape(project_version)} - \d{{4}}-\d{{2}}-\d{{2}}$", changelog, re.MULTILINE):

@@ -65,6 +65,7 @@ class DeterministicE2ETests(ComplianceTestCase):
             self.assertIn("def square", self.tool_text(diff))
 
     def test_long_running_stdin_command(self) -> None:
+        self.require_pty()
         with self.session_for_fixture("long-running-project") as (_workspace, client):
             started = client.call_tool(
                 "exec_command",
@@ -79,10 +80,11 @@ class DeterministicE2ETests(ComplianceTestCase):
             self.assertIn("bye", self.tool_text(bye))
 
     def test_long_running_command_poll_exit_and_closed_stdin_error(self) -> None:
+        self.require_pty()
         with self.session_for_fixture("long-running-project") as (_workspace, client):
             started = client.call_tool(
                 "exec_command",
-                {"cmd": "python repl.py", "tty": True, "timeout_ms": 1000, "yield_time_ms": 0, "max_output_bytes": 4096},
+                {"cmd": "python repl.py", "tty": True, "timeout_ms": 5000, "yield_time_ms": 0, "max_output_bytes": 4096},
             )
             payload = self.assert_tool_success(started)
             command_id = payload.get("command_id")
@@ -102,9 +104,25 @@ class DeterministicE2ETests(ComplianceTestCase):
 
             closed = client.call_tool(
                 "write_stdin",
-                {"command_id": command_id, "chars": "exit\n", "yield_time_ms": 1000, "max_output_bytes": 4096},
+                {"command_id": command_id, "chars": "exit\n", "yield_time_ms": 250, "max_output_bytes": 4096},
             )
-            self.assertIn("bye", self.tool_text(closed))
+            # A PTY may deliver terminal input echo before the child process's
+            # final stdout. Keep polling within a bounded window and assert on
+            # the accumulated stream instead of assuming one response contains
+            # both events.
+            closed_text = self.tool_text(closed)
+            for _ in range(12):
+                if "bye" in closed_text:
+                    break
+                try:
+                    tail = client.call_tool(
+                        "write_stdin",
+                        {"command_id": command_id, "chars": "", "yield_time_ms": 250, "max_output_bytes": 4096},
+                    )
+                except MCPError:
+                    break
+                closed_text += self.tool_text(tail)
+            self.assertIn("bye", closed_text)
             try:
                 late = client.call_tool("write_stdin", {"command_id": command_id, "chars": "late\n"})
             except MCPError:
